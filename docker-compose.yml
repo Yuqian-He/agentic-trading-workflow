@@ -1,0 +1,11 @@
+version: '3.9'
+services:
+  trading-workflow-ai:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app/backend
+    environment:
+      - ENVIRONMENT=development
+      - AGENT_INTERVAL_SECONDS=30
