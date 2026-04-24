@@ -1,6 +1,7 @@
-# Trading Workflow AI
+# Agentic Trading Workflow
 
-Trading Workflow AI is an early-stage backend prototype for an autonomous trading workflow that turns market data, strategy signals, and retrieved context into agent-driven trading decisions.
+
+Agentic Trading Workflow is an early-stage backend prototype for an autonomous trading workflow that turns market data, strategy signals, and retrieved context into agent-driven trading decisions.
 
 ## Project Goal
 
