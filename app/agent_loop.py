@@ -1,11 +1,13 @@
 import asyncio
-from typing import Dict, Any
+from datetime import datetime, timezone
+from typing import Dict, Any, Optional
 
 from .core.config import settings
 from .db.tick_repository import SQLiteTickRepository
+from .db.bar_repository import SQLiteBarRepository
 from .services.data_store import MarketDataStore, NewsStore, HistoricalStore
 from .services.agent import StrategySelectionAgent, ExecutionDecisionAgent
-from .services.market_data import IBMarketDataSource
+from .services.market_data import IBConnection, IBMarketDataSource, IBBarDataSource
 from .services.rag import RAGService
 from .services.signals import SignalsEngine
 
@@ -14,29 +16,65 @@ class AgentLoop:
     def __init__(self):
         self._task = None
         self._running = False
-        self._market_store = MarketDataStore(tick_repository=SQLiteTickRepository(settings.tick_db_path))
-        self._market_data_source = IBMarketDataSource(
+        self._market_store = MarketDataStore(
+            tick_repository=SQLiteTickRepository(settings.tick_db_path),
+            bar_repository=SQLiteBarRepository(settings.bar_db_path),
+            bar_interval="1m",
+        )
+        self._ib_connection = IBConnection(
             host=settings.ib_host,
             port=settings.ib_port,
             client_id=settings.ib_client_id,
-            symbol=settings.ib_symbol,
-            exchange=settings.ib_exchange,
-            currency=settings.ib_currency,
-            market_data_type=settings.ib_market_data_type,
             account=settings.ib_account or None,
         )
+        self._market_data_source = IBMarketDataSource(
+            ib_connection=self._ib_connection,
+            market_data_type=settings.ib_market_data_type,
+        )
+        self._bar_data_source = self._create_bar_data_source("1m")
         self._news_store = NewsStore()
         self._history_store = HistoricalStore()
         self._signals_engine = SignalsEngine()
         self._rag_service = RAGService(self._history_store)
         self._strategy_agent = StrategySelectionAgent()
         self._execution_agent = ExecutionDecisionAgent()
+        self._tick_task = None
+        self._bar_task = None
         self._state: Dict[str, Any] = {
             "last_run": None,
             "strategy": None,
             "decision": None,
             "status": "stopped",
         }
+        self._last_bar_timestamp: Optional[str] = None
+
+    def _create_bar_data_source(self, interval: str) -> IBBarDataSource:
+        return IBBarDataSource(
+            ib_connection=self._ib_connection,
+            bar_interval=interval,
+        )
+
+    @property
+    def bar_interval(self) -> str:
+        return self._bar_data_source.bar_interval
+
+    def bar_interval_options(self):
+        return IBBarDataSource.supported_intervals()
+
+    async def set_bar_interval(self, interval: str):
+        self._bar_data_source.set_bar_interval(interval)
+        self._market_store.bar_interval = interval
+        if self._running:
+            if self._bar_task:
+                self._bar_task.cancel()
+                try:
+                    await self._bar_task
+                except asyncio.CancelledError:
+                    pass
+            await self._bar_data_source.close()
+            self._bar_data_source = self._create_bar_data_source(interval)
+            await self._bar_data_source.connect()
+            self._bar_task = asyncio.create_task(self._bar_loop())
 
     async def start(self):
         if self._running:
@@ -57,16 +95,79 @@ class AgentLoop:
 
 
     async def _loop(self):
+        await self._ib_connection.connect(
+            symbol=settings.ib_symbol,
+            exchange=settings.ib_exchange,
+            currency=settings.ib_currency,
+        )
         await self._market_data_source.connect()
+        await self._bar_data_source.connect()
+
+        self._tick_task = asyncio.create_task(self._tick_loop())
+        self._bar_task = asyncio.create_task(self._bar_loop())
+
         try:
             while self._running:
-                # update market data
-                tick = await self._market_data_source.next_tick()
-                self._market_store.update_tick(tick)
-
-                await asyncio.sleep(1)
+                await asyncio.sleep(0.5)
         finally:
+            if self._tick_task:
+                self._tick_task.cancel()
+            if self._bar_task:
+                self._bar_task.cancel()
             await self._market_data_source.close()
+            await self._bar_data_source.close()
+            await self._ib_connection.close()
+
+    async def _tick_loop(self):
+        while self._running:
+            tick = await self._market_data_source.next_tick()
+            self._market_store.update_tick(tick)
+            await asyncio.sleep(0)
+
+    async def _bar_loop(self):
+        while self._running:
+            # Demo-friendly behavior:
+            # - During trading hours, IB returns a new bar timestamp each interval.
+            # - Off hours/weekends, bar timestamps often stop changing; for demo we still
+            #   emit a synthetic bar per interval using the latest delayed tick price.
+            await self._sleep_until_next_bar_boundary()
+
+            bar = await self._bar_data_source.fetch_latest_bar()
+            bar_ts = bar.get("timestamp") if bar else None
+
+            if bar and bar_ts and bar_ts != self._last_bar_timestamp:
+                self._market_store.update_bar(bar)
+                self._last_bar_timestamp = bar_ts
+                continue
+
+            # Fallback: synthesize a bar so DB shows periodic updates in demo mode.
+            tick = self._market_store.current_tick
+            price = tick.get("price")
+            if price is None:
+                # Nothing to synthesize yet; try again next interval.
+                continue
+
+            interval_s = IBBarDataSource.interval_seconds(self.bar_interval)
+            now_s = int(datetime.now(timezone.utc).timestamp())
+            bucket_start = (now_s // interval_s) * interval_s
+            synthetic_ts = datetime.fromtimestamp(bucket_start, tz=timezone.utc).isoformat()
+            if synthetic_ts == self._last_bar_timestamp:
+                continue
+
+            synthetic_bar = {
+                "symbol": tick.get("symbol") or settings.ib_symbol,
+                "open": price,
+                "high": price,
+                "low": price,
+                "close": price,
+                "volume": 0,
+                "timestamp": synthetic_ts,
+                "source": "synthetic_bar",
+            }
+            self._market_store.update_bar(synthetic_bar)
+            self._last_bar_timestamp = synthetic_ts
+            # Minimal test mode: skip strategy for now.
+            # await self._strategy_cycle()
 
     async def _strategy_cycle(self):
 
@@ -97,6 +198,20 @@ class AgentLoop:
 
         self._state["strategy"] = strategy
         self._state["decision"] = decision
+        self._state["last_run"] = datetime.utcnow().isoformat()
+
+    async def _sleep_until_next_bar_boundary(self):
+        # Align bar loop to the selected interval boundary.
+        interval = self.bar_interval
+        try:
+            seconds = IBBarDataSource.interval_seconds(interval)
+        except Exception:
+            seconds = 60
+
+        now = datetime.now(timezone.utc).timestamp()
+        next_boundary = ((int(now) // seconds) + 1) * seconds
+        sleep_for = max(0.0, next_boundary - now)
+        await asyncio.sleep(max(0.25, sleep_for))
 
     def status(self):
         return {
@@ -105,6 +220,7 @@ class AgentLoop:
             "strategy": self._state["strategy"],
             "decision": self._state["decision"],
             "status": self._state["status"],
+            "bar_interval": self.bar_interval,
         }
 
     def market_summary(self):

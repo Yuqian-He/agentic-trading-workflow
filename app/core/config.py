@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     ib_currency: str = "USD"
     ib_market_data_type: int = 3
     tick_db_path: str = "data/market_ticks.sqlite3"
+    bar_db_path: str = "data/market_bars.sqlite3"
 
     class Config:
         env_file = ".env"
