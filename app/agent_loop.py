@@ -1,9 +1,11 @@
 import asyncio
-from datetime import datetime
 from typing import Dict, Any
 
+from .core.config import settings
+from .db.tick_repository import SQLiteTickRepository
 from .services.data_store import MarketDataStore, NewsStore, HistoricalStore
 from .services.agent import StrategySelectionAgent, ExecutionDecisionAgent
+from .services.market_data import IBMarketDataSource
 from .services.rag import RAGService
 from .services.signals import SignalsEngine
 
@@ -12,8 +14,17 @@ class AgentLoop:
     def __init__(self):
         self._task = None
         self._running = False
-        self._last_bar_ts = None
-        self._market_store = MarketDataStore()
+        self._market_store = MarketDataStore(tick_repository=SQLiteTickRepository(settings.tick_db_path))
+        self._market_data_source = IBMarketDataSource(
+            host=settings.ib_host,
+            port=settings.ib_port,
+            client_id=settings.ib_client_id,
+            symbol=settings.ib_symbol,
+            exchange=settings.ib_exchange,
+            currency=settings.ib_currency,
+            market_data_type=settings.ib_market_data_type,
+            account=settings.ib_account or None,
+        )
         self._news_store = NewsStore()
         self._history_store = HistoricalStore()
         self._signals_engine = SignalsEngine()
@@ -46,18 +57,16 @@ class AgentLoop:
 
 
     async def _loop(self):
-        while self._running:
-            # update market data
-            self._market_store.update_tick()
-            # strategy only runs when new bar arrives
-            if self._market_store.is_new_bar():
-                bar_ts = self._market_store.current_bar_timestamp()
+        await self._market_data_source.connect()
+        try:
+            while self._running:
+                # update market data
+                tick = await self._market_data_source.next_tick()
+                self._market_store.update_tick(tick)
 
-                if bar_ts != self._last_bar_ts:
-                    self._last_bar_ts = bar_ts
-                    asyncio.create_task(self._strategy_cycle())
-
-            await asyncio.sleep(1)
+                await asyncio.sleep(1)
+        finally:
+            await self._market_data_source.close()
 
     async def _strategy_cycle(self):
 

@@ -8,6 +8,6 @@ class StrategySelectionAgent:
 
 
 class ExecutionDecisionAgent:
-    def decide(self, strategy_name: str, signals: Dict[str, Any], context: Dict[str, Any]) -> str:
+    def decide(self, strategy_name: str, signals: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
         # TODO: 使用 Agent 决策是否执行
-        return "execute" if signals else "skip"
+        return {"action": "execute" if signals else "hold", "strategy": strategy_name}
