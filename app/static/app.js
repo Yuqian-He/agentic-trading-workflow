@@ -1,53 +1,303 @@
 const output = document.getElementById('output');
-const statusBtn = document.getElementById('btn-status');
 const startBtn = document.getElementById('btn-start');
 const stopBtn = document.getElementById('btn-stop');
+const logEl = document.getElementById('log');
+
+const tickerSelect = document.getElementById('ticker');
 const barIntervalSelect = document.getElementById('bar-interval');
-const updateIntervalBtn = document.getElementById('btn-update-interval');
+const sessionEl = document.getElementById('session');
+const logBuffer = [];
+const DEFAULT_TICKERS = ['AAPL', 'MSFT'];
+const DEFAULT_INTERVALS = ['1m', '3m', '5m', '15m', '30m', '45m', '1H', '2H', '3H', '4H'];
+let lastSeenLoopStatus = null;
+let lastSeenLoopError = null;
 
-async function fetchJson(path, options) {
-  const res = await fetch(path, options);
-  return res.json();
+function setBusy(isBusy) {
+  if (startBtn) startBtn.disabled = isBusy;
+  if (stopBtn) stopBtn.disabled = isBusy;
 }
 
-async function updateStatus() {
-  const status = await fetchJson('/api/status');
-  output.textContent = JSON.stringify(status, null, 2);
-}
+async function fetchJson(path, options = {}, timeoutMs = 12000, logMode = 'verbose') {
+  const method = options?.method || 'GET';
+  const shouldLogRequest = logMode === 'verbose';
+  const shouldLogSuccess = logMode === 'verbose';
+  const shouldLogError = true;
 
-async function updateSettings() {
-  const settings = await fetchJson('/api/settings');
-  if (barIntervalSelect) {
-    barIntervalSelect.innerHTML = settings.options
-      .map(option => `
-        <option value="${option}"${option === settings.bar_interval ? ' selected' : ''}>
-          ${option}
-        </option>`)
-      .join('');
+  if (shouldLogRequest) appendLog(`request: ${method} ${path}`);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(path, { ...options, signal: controller.signal });
+    clearTimeout(timer);
+    if (!res.ok) {
+      const text = await res.text();
+      if (shouldLogError) appendLog(`response error: ${res.status} ${path}`);
+      throw new Error(`${res.status} ${res.statusText}: ${text}`);
+    }
+    if (shouldLogSuccess) appendLog(`response ok: ${res.status} ${path}`);
+    return res.json();
+  } catch (err) {
+    if (err?.name === 'AbortError') {
+      if (shouldLogError) appendLog(`request timeout: ${method} ${path}`);
+      throw new Error(`request timeout for ${path}`);
+    }
+    throw err;
   }
 }
 
-statusBtn.onclick = updateStatus;
-startBtn.onclick = async () => {
-  await fetchJson('/api/control/start', { method: 'POST' });
-  await updateStatus();
-};
-stopBtn.onclick = async () => {
-  await fetchJson('/api/control/stop', { method: 'POST' });
-  await updateStatus();
-};
-
-if (updateIntervalBtn) {
-  updateIntervalBtn.onclick = async () => {
-    const interval = barIntervalSelect.value;
-    await fetchJson('/api/settings/bar-interval', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ interval }),
-    });
-    await Promise.all([updateStatus(), updateSettings()]);
-  };
+function appendLog(message) {
+  if (!logEl) return;
+  const ts = new Date().toLocaleTimeString();
+  logBuffer.push(`[${ts}] ${message}`);
+  if (logBuffer.length > 200) logBuffer.shift();
+  logEl.textContent = logBuffer.join('\n');
+  logEl.scrollTop = logEl.scrollHeight;
 }
 
-updateSettings();
-updateStatus();
+function renderSession({ symbol, bar_interval }) {
+  if (!sessionEl) return;
+  sessionEl.innerHTML = `
+    <div class="pill">Ticker: ${symbol ?? '-'}</div>
+    <div class="pill">Interval: ${bar_interval ?? '-'}</div>
+  `;
+}
+
+function normalizeOptions(raw, fallback = []) {
+  if (!Array.isArray(raw)) return fallback;
+  const normalized = raw
+    .map((item) => {
+      if (typeof item === 'string') return item.trim();
+      if (item == null) return '';
+      return String(item).trim();
+    })
+    .filter(Boolean);
+  return normalized.length > 0 ? normalized : fallback;
+}
+
+function setSelectOptions(selectEl, options, selectedValue) {
+  if (!selectEl) return;
+  selectEl.innerHTML = '';
+
+  if (!options || options.length === 0) {
+    const emptyOpt = document.createElement('option');
+    emptyOpt.value = '';
+    emptyOpt.textContent = 'No options available';
+    emptyOpt.disabled = true;
+    emptyOpt.selected = true;
+    selectEl.appendChild(emptyOpt);
+    return;
+  }
+
+  options.forEach((value) => {
+    const opt = document.createElement('option');
+    opt.value = value;
+    opt.textContent = value;
+    if (value === selectedValue) opt.selected = true;
+    selectEl.appendChild(opt);
+  });
+
+  if (!selectEl.value) selectEl.value = options[0];
+}
+
+async function updateStatus() {
+  try {
+    const status = await fetchJson('/api/status', {}, 12000, 'silent');
+    renderSession(status);
+  } catch (err) {
+    appendLog(`status update failed: ${err.message}`);
+  }
+}
+
+function formatLiveData(live) {
+  const tick = live?.tick || {};
+  const bar = live?.bar || {};
+  const ticker = live?.user_input?.ticker ?? '-';
+  const interval = live?.user_input?.interval ?? '-';
+  const running = live?.status ?? (live?.running ? 'running' : 'stopped');
+  const latestPrice = live?.latest_price ?? '-';
+  const lastError = live?.last_error ?? '-';
+
+  const bidAsk = `${tick.bid ?? '-'} / ${tick.ask ?? '-'}`;
+  const ohlc = `${bar.open ?? '-'} / ${bar.high ?? '-'} / ${bar.low ?? '-'} / ${bar.close ?? '-'}`;
+  return `
+    <div class="liveBlock">
+      <p class="liveBlockTitle">User Input</p>
+      <div class="kv"><div class="k">Ticker</div><div class="v">${ticker}</div></div>
+      <div class="kv"><div class="k">Interval</div><div class="v">${interval}</div></div>
+      <div class="kv"><div class="k">Status</div><div class="v">${running}</div></div>
+      <div class="kv"><div class="k">Last Error</div><div class="v">${lastError}</div></div>
+      <div class="kv"><div class="k">Latest Px</div><div class="v">${latestPrice}</div></div>
+    </div>
+    <div class="liveBlock">
+      <p class="liveBlockTitle">Live Tick</p>
+      <div class="kv"><div class="k">Symbol</div><div class="v">${tick.symbol ?? '-'}</div></div>
+      <div class="kv"><div class="k">Price</div><div class="v">${tick.price ?? '-'}</div></div>
+      <div class="kv"><div class="k">Bid/Ask</div><div class="v">${bidAsk}</div></div>
+      <div class="kv"><div class="k">Volume</div><div class="v">${tick.volume ?? '-'}</div></div>
+      <div class="kv"><div class="k">Time</div><div class="v">${tick.timestamp ?? '-'}</div></div>
+      <div class="kv"><div class="k">Source</div><div class="v">${tick.source ?? '-'}</div></div>
+    </div>
+    <div class="liveBlock liveWide">
+      <p class="liveBlockTitle">Live Bar</p>
+      <div class="kv"><div class="k">Symbol</div><div class="v">${bar.symbol ?? '-'}</div></div>
+      <div class="kv"><div class="k">OHLC</div><div class="v">${ohlc}</div></div>
+      <div class="kv"><div class="k">Volume</div><div class="v">${bar.volume ?? '-'}</div></div>
+      <div class="kv"><div class="k">Time</div><div class="v">${bar.timestamp ?? '-'}</div></div>
+      <div class="kv"><div class="k">Source</div><div class="v">${bar.source ?? '-'}</div></div>
+    </div>
+  `;
+}
+
+async function updateLive() {
+  try {
+    const live = await fetchJson('/api/live', {}, 12000, 'silent');
+    if (live?.status && live.status !== lastSeenLoopStatus) {
+      appendLog(`loop status changed: ${lastSeenLoopStatus || 'unknown'} -> ${live.status}`);
+      lastSeenLoopStatus = live.status;
+    }
+    if (live?.status === 'error' && live?.last_error && live.last_error !== lastSeenLoopError) {
+      appendLog(`loop error: ${live.last_error}`);
+      lastSeenLoopError = live.last_error;
+    }
+    output.innerHTML = formatLiveData(live);
+  } catch (err) {
+    appendLog(`live data update failed: ${err.message}`);
+  }
+}
+
+function renderUserSelectionPreview() {
+  const preview = {
+    running: false,
+    latest_price: '-',
+    user_input: {
+      ticker: tickerSelect?.value ?? '-',
+      interval: barIntervalSelect?.value ?? '-',
+    },
+    tick: {},
+    bar: {},
+  };
+  output.innerHTML = formatLiveData(preview);
+}
+
+if (tickerSelect) {
+  tickerSelect.addEventListener('change', () => {
+    appendLog(`ticker changed: ${tickerSelect.value || '-'}`);
+    renderUserSelectionPreview();
+  });
+}
+
+if (barIntervalSelect) {
+  barIntervalSelect.addEventListener('change', () => {
+    appendLog(`interval changed: ${barIntervalSelect.value || '-'}`);
+    renderUserSelectionPreview();
+  });
+}
+
+async function updateSettings() {
+  if (tickerSelect && tickerSelect.options.length === 0) {
+    setSelectOptions(tickerSelect, DEFAULT_TICKERS, DEFAULT_TICKERS[0]);
+  }
+  if (barIntervalSelect && barIntervalSelect.options.length === 0) {
+    setSelectOptions(barIntervalSelect, DEFAULT_INTERVALS, DEFAULT_INTERVALS[0]);
+  }
+
+  try {
+    const settings = await fetchJson('/api/settings', {}, 12000, 'verbose');
+    const tickers = normalizeOptions(settings.ticker_options, DEFAULT_TICKERS);
+    const intervals = normalizeOptions(settings.options, DEFAULT_INTERVALS);
+
+    if (tickerSelect) {
+      setSelectOptions(tickerSelect, tickers, settings.symbol);
+    }
+
+    if (barIntervalSelect) {
+      setSelectOptions(barIntervalSelect, intervals, settings.bar_interval);
+    }
+
+    appendLog(`settings loaded: ${tickers.length} tickers, ${intervals.length} intervals`);
+    renderSession({ symbol: settings.symbol, bar_interval: settings.bar_interval });
+  } catch (err) {
+    appendLog(`settings fetch failed, using local defaults: ${err.message}`);
+    renderSession({
+      symbol: tickerSelect?.value || DEFAULT_TICKERS[0],
+      bar_interval: barIntervalSelect?.value || DEFAULT_INTERVALS[0],
+    });
+  }
+}
+
+async function applySelections() {
+  const interval = barIntervalSelect?.value;
+  const symbol = tickerSelect?.value;
+
+  if (!symbol) throw new Error('ticker is empty');
+  if (!interval) throw new Error('interval is empty');
+
+  await fetchJson('/api/settings/ticker', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ symbol }),
+  });
+
+  await fetchJson('/api/settings/bar-interval', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ interval }),
+  });
+}
+
+async function handleStartClick() {
+  setBusy(true);
+  try {
+    appendLog(`start requested: applying ${tickerSelect?.value} / ${barIntervalSelect?.value}`);
+    renderUserSelectionPreview();
+    await applySelections();
+    appendLog('settings applied, starting loop');
+    await fetchJson('/api/control/start', { method: 'POST' });
+    appendLog(`loop started with ${tickerSelect?.value} / ${barIntervalSelect?.value}`);
+    await Promise.all([updateStatus(), updateLive()]);
+  } catch (err) {
+    appendLog(`start failed: ${err.message}`);
+  } finally {
+    appendLog('start action finished');
+    setBusy(false);
+  }
+}
+
+async function handleStopClick() {
+  setBusy(true);
+  try {
+    appendLog('stop requested');
+    await fetchJson('/api/control/stop', { method: 'POST' });
+    appendLog('loop stopped');
+    await Promise.all([updateStatus(), updateLive()]);
+  } catch (err) {
+    appendLog(`stop failed: ${err.message}`);
+  } finally {
+    appendLog('stop action finished');
+    setBusy(false);
+  }
+}
+
+if (startBtn) {
+  startBtn.addEventListener('click', () => {
+    appendLog('start button clicked');
+    handleStartClick();
+  });
+}
+
+if (stopBtn) {
+  stopBtn.addEventListener('click', () => {
+    appendLog('stop button clicked');
+    handleStopClick();
+  });
+}
+
+Promise.all([updateSettings(), updateStatus(), updateLive()])
+  .then(() => {
+    appendLog('ui ready');
+    appendLog('button handlers attached');
+  })
+  .catch((err) => appendLog(`init failed: ${err.message}`));
+
+setInterval(updateStatus, 5000);
+setInterval(updateLive, 2000);

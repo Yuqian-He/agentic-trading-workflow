@@ -40,11 +40,15 @@ class AgentLoop:
         self._execution_agent = ExecutionDecisionAgent()
         self._tick_task = None
         self._bar_task = None
+        self._reconnect_lock = asyncio.Lock()
+        self._reconnecting = False
+        self._symbol: str = settings.ib_symbol
         self._state: Dict[str, Any] = {
             "last_run": None,
             "strategy": None,
             "decision": None,
             "status": "stopped",
+            "last_error": None,
         }
         self._last_bar_timestamp: Optional[str] = None
 
@@ -65,23 +69,40 @@ class AgentLoop:
         self._bar_data_source.set_bar_interval(interval)
         self._market_store.bar_interval = interval
         if self._running:
-            if self._bar_task:
-                self._bar_task.cancel()
-                try:
-                    await self._bar_task
-                except asyncio.CancelledError:
-                    pass
-            await self._bar_data_source.close()
-            self._bar_data_source = self._create_bar_data_source(interval)
-            await self._bar_data_source.connect()
-            self._bar_task = asyncio.create_task(self._bar_loop())
+            # Use full restart to avoid partial reconnect edge-cases.
+            await self.stop()
+            await self.start()
+
+    @property
+    def symbol(self) -> str:
+        return self._symbol
+
+    def ticker_options(self):
+        # Demo list; expand later (could come from config or a DB table)
+        return ["AAPL", "MSFT"]
+
+    async def set_ticker(self, symbol: str):
+        symbol = (symbol or "").strip().upper()
+        if not symbol:
+            raise ValueError("Ticker cannot be empty")
+        self._symbol = symbol
+
+        # For simplicity: if running, restart the IB connection to apply new contract.
+        if self._running:
+            await self.stop()
+            await self.start()
 
     async def start(self):
         if self._running:
             return
         self._running = True
         self._state["status"] = "running"
+        self._state["last_error"] = None
         self._task = asyncio.create_task(self._loop())
+        # If startup fails immediately (e.g., IB connection/auth), surface it to API caller.
+        await asyncio.sleep(0.2)
+        if not self._running and self._state.get("last_error"):
+            raise RuntimeError(self._state["last_error"])
 
     async def stop(self):
         self._running = False
@@ -95,20 +116,24 @@ class AgentLoop:
 
 
     async def _loop(self):
-        await self._ib_connection.connect(
-            symbol=settings.ib_symbol,
-            exchange=settings.ib_exchange,
-            currency=settings.ib_currency,
-        )
-        await self._market_data_source.connect()
-        await self._bar_data_source.connect()
-
-        self._tick_task = asyncio.create_task(self._tick_loop())
-        self._bar_task = asyncio.create_task(self._bar_loop())
-
         try:
+            await self._ib_connection.connect(
+                symbol=self._symbol,
+                exchange=settings.ib_exchange,
+                currency=settings.ib_currency,
+            )
+            await self._market_data_source.connect()
+            await self._bar_data_source.connect()
+            self._start_worker_tasks()
+
             while self._running:
                 await asyncio.sleep(0.5)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self._state["last_error"] = str(exc)
+            self._state["status"] = "error"
+            self._running = False
         finally:
             if self._tick_task:
                 self._tick_task.cancel()
@@ -117,6 +142,69 @@ class AgentLoop:
             await self._market_data_source.close()
             await self._bar_data_source.close()
             await self._ib_connection.close()
+
+    def _start_worker_tasks(self):
+        self._tick_task = asyncio.create_task(self._tick_loop())
+        self._bar_task = asyncio.create_task(self._bar_loop())
+        self._tick_task.add_done_callback(self._handle_worker_task_done)
+        self._bar_task.add_done_callback(self._handle_worker_task_done)
+
+    def _handle_worker_task_done(self, task: asyncio.Task):
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is None:
+            return
+        self._state["last_error"] = f"worker task failed: {exc}"
+        if not self._running:
+            self._state["status"] = "stopped"
+            return
+
+        if "Not connected" in str(exc):
+            self._state["status"] = "recovering"
+            if not self._reconnecting:
+                asyncio.create_task(self._recover_connection())
+            return
+
+        self._state["status"] = "error"
+        self._running = False
+
+    async def _recover_connection(self):
+        if self._reconnecting:
+            return
+        self._reconnecting = True
+        async with self._reconnect_lock:
+            try:
+                if not self._running:
+                    return
+                self._state["status"] = "recovering"
+
+                if self._tick_task and not self._tick_task.done():
+                    self._tick_task.cancel()
+                if self._bar_task and not self._bar_task.done():
+                    self._bar_task.cancel()
+
+                await self._market_data_source.close()
+                await self._bar_data_source.close()
+                await self._ib_connection.close()
+                await asyncio.sleep(0.5)
+
+                await self._ib_connection.connect(
+                    symbol=self._symbol,
+                    exchange=settings.ib_exchange,
+                    currency=settings.ib_currency,
+                )
+                await self._market_data_source.connect()
+                await self._bar_data_source.connect()
+                self._start_worker_tasks()
+                self._state["status"] = "running"
+                self._state["last_error"] = None
+            except Exception as exc:
+                self._state["last_error"] = f"reconnect failed: {exc}"
+                self._state["status"] = "error"
+                self._running = False
+            finally:
+                self._reconnecting = False
 
     async def _tick_loop(self):
         while self._running:
@@ -220,7 +308,24 @@ class AgentLoop:
             "strategy": self._state["strategy"],
             "decision": self._state["decision"],
             "status": self._state["status"],
+            "last_error": self._state.get("last_error"),
+            "symbol": self.symbol,
             "bar_interval": self.bar_interval,
+        }
+
+    def live_view(self):
+        market = self._market_store.market_summary()
+        return {
+            "running": self._running,
+            "status": self._state["status"],
+            "last_error": self._state.get("last_error"),
+            "user_input": {
+                "ticker": self.symbol,
+                "interval": self.bar_interval,
+            },
+            "latest_price": market.get("latest_price"),
+            "tick": market.get("tick"),
+            "bar": market.get("bar"),
         }
 
     def market_summary(self):

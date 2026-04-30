@@ -9,4 +9,5 @@ class AgentStatus(BaseModel):
     strategy: Optional[Any]
     decision: Optional[Any]
     status: str
+    symbol: str
     bar_interval: str

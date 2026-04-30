@@ -11,7 +11,6 @@ BASE_DIR = Path(__file__).resolve().parent
 
 @asynccontextmanager
 async def lifespan(app):
-    await agent_loop.start()
     yield
     await agent_loop.stop()
 
