@@ -1,6 +1,6 @@
 import sqlite3
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 
 class SQLiteBarRepository:
@@ -54,4 +54,34 @@ class SQLiteBarRepository:
                     bar.get("source"),
                 ),
             )
+
+    def fetch_recent_bars(self, symbol: str, interval: str, limit: int) -> List[Dict[str, Any]]:
+        safe_limit = max(1, int(limit))
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT symbol, open, high, low, close, volume, timestamp, source
+                FROM bars
+                WHERE symbol = ? AND interval = ?
+                ORDER BY timestamp DESC
+                LIMIT ?
+                """,
+                (symbol, interval, safe_limit),
+            ).fetchall()
+        rows = list(reversed(rows))
+        result: List[Dict[str, Any]] = []
+        for row in rows:
+            result.append(
+                {
+                    "symbol": row[0],
+                    "open": row[1],
+                    "high": row[2],
+                    "low": row[3],
+                    "close": row[4],
+                    "volume": row[5],
+                    "timestamp": row[6],
+                    "source": row[7],
+                }
+            )
+        return result
 

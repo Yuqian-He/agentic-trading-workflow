@@ -11,15 +11,6 @@ The goal of this project is to explore how a trading system can be organized aro
 
 The current market data path connects to a local Interactive Brokers TWS or IB Gateway instance using `ib_insync`.
 
-For development, it is configured for a paper trading style local connection:
-
-```text
-host: 127.0.0.1
-port: 7497
-clientId: 101
-symbol: AAPL
-```
-
 Because this demo does not assume paid real-time market data subscriptions, the backend currently requests delayed market data with `reqMarketDataType(3)` and streams quote updates through `reqMktData`. These updates are normalized into tick-like records, cached as the latest market snapshot, and written to SQLite. 
 
 ## Run Locally

@@ -98,32 +98,21 @@ function renderIndicators(live) {
   const summary = live?.signals_summary || {};
   const indicators = summary?.indicators || {};
   const signals = summary?.signals || {};
+  const inputs = summary?.inputs || {};
   const lastRun = formatLastRun(summary?.last_run || live?.last_run);
-  const keys = Object.keys(indicators);
-
-  if (keys.length === 0) {
-    indicatorsEl.innerHTML = `
-      <div class="indicatorCard">
-        <div class="indicatorHead">
-          <div class="indicatorName">NO DATA</div>
-          <div class="indicatorRun">Last run: ${lastRun}</div>
-        </div>
-        <div class="kv"><div class="k">Value</div><div class="v">-</div></div>
-        <div class="kv"><div class="k">Signal</div><div class="v">-</div></div>
-      </div>
-    `;
-    return;
-  }
+  const keys = Array.from(new Set([...Object.keys(indicators), ...Object.keys(inputs)]));
 
   indicatorsEl.innerHTML = keys
     .map((name) => {
       const signalKey = INDICATOR_SIGNAL_MAP[name] || `${name}_signal`;
+      const cfg = inputs[name] ? JSON.stringify(inputs[name]) : '-';
       return `
         <div class="indicatorCard">
           <div class="indicatorHead">
             <div class="indicatorName">${String(name).toUpperCase()}</div>
             <div class="indicatorRun">Last run: ${lastRun}</div>
           </div>
+          <div class="kv"><div class="k">Input</div><div class="v">${cfg}</div></div>
           <div class="kv"><div class="k">Value</div><div class="v">${indicators[name] ?? '-'}</div></div>
           <div class="kv"><div class="k">Signal</div><div class="v">${signals[signalKey] ?? '-'}</div></div>
         </div>
@@ -147,6 +136,32 @@ function getIndicatorInputs() {
       timeframe: rsiTimeframeSelect?.value ?? 'chart',
     },
   };
+}
+
+function applyIndicatorInputsToForm(rawInputs) {
+  const inputs = rawInputs || {};
+  const sma = inputs.sma || {};
+  const rsi = inputs.rsi || {};
+
+  if (smaSourceSelect && sma.source != null) smaSourceSelect.value = String(sma.source);
+  if (smaLengthInput && sma.length != null) smaLengthInput.value = String(sma.length);
+  if (smaTimeframeSelect && sma.timeframe != null) smaTimeframeSelect.value = String(sma.timeframe);
+
+  if (rsiLengthInput && rsi.length != null) rsiLengthInput.value = String(rsi.length);
+  if (rsiSourceSelect && rsi.source != null) rsiSourceSelect.value = String(rsi.source);
+  if (rsiOverboughtInput && rsi.overbought != null) rsiOverboughtInput.value = String(rsi.overbought);
+  if (rsiOversoldInput && rsi.oversold != null) rsiOversoldInput.value = String(rsi.oversold);
+  if (rsiTimeframeSelect && rsi.timeframe != null) rsiTimeframeSelect.value = String(rsi.timeframe);
+}
+
+async function persistIndicatorInputs() {
+  const payload = getIndicatorInputs();
+  await fetchJson('/api/settings/indicator-inputs', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  }, 12000, 'silent');
+  appendLog(`indicator inputs saved: ${JSON.stringify(payload)}`);
 }
 
 function normalizeOptions(raw, fallback = []) {
@@ -292,8 +307,14 @@ if (barIntervalSelect) {
   rsiTimeframeSelect,
 ].forEach((el) => {
   if (!el) return;
-  el.addEventListener('change', () => {
+  el.addEventListener('change', async () => {
     appendLog(`indicator input updated: ${JSON.stringify(getIndicatorInputs())}`);
+    try {
+      await persistIndicatorInputs();
+      await updateLive();
+    } catch (err) {
+      appendLog(`indicator input save failed: ${err.message}`);
+    }
   });
 });
 
@@ -317,6 +338,7 @@ async function updateSettings() {
     if (barIntervalSelect) {
       setSelectOptions(barIntervalSelect, intervals, settings.bar_interval);
     }
+    applyIndicatorInputsToForm(settings.indicator_inputs);
 
     appendLog(`settings loaded: ${tickers.length} tickers, ${intervals.length} intervals`);
     renderSession({ symbol: settings.symbol, bar_interval: settings.bar_interval });
@@ -347,6 +369,8 @@ async function applySelections() {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ interval }),
   });
+
+  await persistIndicatorInputs();
 }
 
 async function handleStartClick() {

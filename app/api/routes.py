@@ -18,6 +18,11 @@ class TickerRequest(BaseModel):
     symbol: str
 
 
+class IndicatorInputsRequest(BaseModel):
+    sma: dict = {}
+    rsi: dict = {}
+
+
 @router.get("/status", response_model=AgentStatus)
 async def get_status():
     return present_status(agent_loop.status())
@@ -61,6 +66,7 @@ async def get_settings():
         "ticker_options": UISettingsService.ticker_options(),
         "bar_interval": agent_loop.bar_interval,
         "options": UISettingsService.bar_interval_options(),
+        "indicator_inputs": agent_loop.indicator_inputs(),
     }
 
 
@@ -84,3 +90,13 @@ async def set_ticker(request: TickerRequest):
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to update ticker: {exc}")
     return JSONResponse({"detail": "Ticker updated", "symbol": agent_loop.symbol})
+
+
+@router.post("/settings/indicator-inputs")
+async def set_indicator_inputs(request: IndicatorInputsRequest):
+    try:
+        payload = request.model_dump() if hasattr(request, "model_dump") else request.dict()
+        await agent_loop.set_indicator_inputs(payload)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to update indicator inputs: {exc}")
+    return JSONResponse({"detail": "Indicator inputs updated", "indicator_inputs": agent_loop.indicator_inputs()})

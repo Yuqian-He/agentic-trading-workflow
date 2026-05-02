@@ -5,6 +5,7 @@ from typing import Dict, Any, Optional
 from .core.config import settings
 from .db.tick_repository import SQLiteTickRepository
 from .db.bar_repository import SQLiteBarRepository
+from .db.indicator_settings_repository import SQLiteIndicatorSettingsRepository
 from .services.data_store import MarketDataStore, NewsStore, HistoricalStore, SignalStore
 from .services.agent import StrategySelectionAgent, ExecutionDecisionAgent
 from .services.market_data import IBConnection, IBMarketDataSource, IBBarDataSource
@@ -33,10 +34,11 @@ class AgentLoop:
             market_data_type=settings.ib_market_data_type,
         )
         self._bar_data_source = self._create_bar_data_source("1m")
+        self._indicator_settings_repo = SQLiteIndicatorSettingsRepository(settings.bar_db_path)
         self._news_store = NewsStore()
         self._history_store = HistoricalStore()
         self._signal_store = SignalStore()
-        self._indicator_engine = IndicatorEngine()
+        self._indicator_engine = IndicatorEngine(bar_fetcher=self._fetch_recent_bars)
         self._execution_service = ExecutionService()
         self._rag_service = RAGService(self._history_store)
         self._strategy_agent = StrategySelectionAgent()
@@ -55,6 +57,8 @@ class AgentLoop:
             "last_error": None,
         }
         self._last_bar_timestamp: Optional[str] = None
+        self._indicator_inputs = self._load_indicator_inputs()
+        self._indicator_engine.set_inputs(self._indicator_inputs)
 
     def _create_bar_data_source(self, interval: str) -> IBBarDataSource:
         return IBBarDataSource(
@@ -69,6 +73,7 @@ class AgentLoop:
     async def set_bar_interval(self, interval: str):
         self._bar_data_source.set_bar_interval(interval)
         self._market_store.bar_interval = interval
+        self._indicator_engine.set_runtime_context(self._symbol, interval)
         if self._running:
             # Use full restart to avoid partial reconnect edge-cases.
             await self.stop()
@@ -83,11 +88,44 @@ class AgentLoop:
         if not symbol:
             raise ValueError("Ticker cannot be empty")
         self._symbol = symbol
+        self._indicator_engine.set_runtime_context(self._symbol, self.bar_interval)
 
         # if running, restart the IB connection to apply new contract.
         if self._running:
             await self.stop()
             await self.start()
+
+    def _fetch_recent_bars(self, symbol: str, interval: str, limit: int):
+        repo = self._market_store.bar_repository
+        if not repo or not hasattr(repo, "fetch_recent_bars"):
+            return []
+        return repo.fetch_recent_bars(symbol=symbol, interval=interval, limit=limit)
+
+    def _load_indicator_inputs(self) -> Dict[str, Any]:
+        stored = self._indicator_settings_repo.load("indicator_inputs")
+        defaults = self._indicator_engine.get_inputs()
+        merged = dict(defaults)
+        for name, cfg in (stored or {}).items():
+            if name in merged and isinstance(cfg, dict):
+                merged[name] = {**merged[name], **cfg}
+        return merged
+
+    def indicator_inputs(self) -> Dict[str, Any]:
+        return dict(self._indicator_inputs)
+
+    async def set_indicator_inputs(self, payload: Dict[str, Any]):
+        defaults = self._indicator_engine.get_inputs()
+        merged = dict(defaults)
+        for name, cfg in (payload or {}).items():
+            if name in merged and isinstance(cfg, dict):
+                merged[name] = {**merged[name], **cfg}
+
+        self._indicator_inputs = merged
+        self._indicator_engine.set_inputs(self._indicator_inputs)
+        self._indicator_settings_repo.save("indicator_inputs", self._indicator_inputs)
+
+        if self._market_store.current_bar:
+            await self._strategy_cycle()
 
     async def start(self):
         if self._running:
@@ -259,6 +297,7 @@ class AgentLoop:
 
     async def _strategy_cycle(self):
         last_run = datetime.utcnow().isoformat()
+        self._indicator_engine.set_runtime_context(self.symbol, self.bar_interval)
         calc_result = self._indicator_engine.calculate_all(self._market_store.current_bar)
         indicators = calc_result.get("indicators", {})
         signals = calc_result.get("signals", {})
@@ -320,7 +359,9 @@ class AgentLoop:
         return self._market_store.market_summary()
 
     def signals_summary(self):
-        return self._signal_store.summary()
+        summary = self._signal_store.summary()
+        summary["inputs"] = self.indicator_inputs()
+        return summary
 
 
 agent_loop = AgentLoop()
