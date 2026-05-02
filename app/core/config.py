@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     ib_exchange: str = "SMART"
     ib_currency: str = "USD"
     ib_market_data_type: int = 3
+    ib_ticker_options_csv: str = "AAPL,MSFT"
     tick_db_path: str = "data/market_ticks.sqlite3"
     bar_db_path: str = "data/market_bars.sqlite3"
 

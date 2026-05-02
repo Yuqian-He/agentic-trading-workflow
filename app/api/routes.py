@@ -4,6 +4,8 @@ from pydantic import BaseModel
 
 from ..agent_loop import agent_loop
 from ..models.schemas import AgentStatus
+from ..presenters.live_presenter import present_live, present_status
+from ..services.ui_settings import UISettingsService
 
 router = APIRouter()
 
@@ -18,7 +20,7 @@ class TickerRequest(BaseModel):
 
 @router.get("/status", response_model=AgentStatus)
 async def get_status():
-    return agent_loop.status()
+    return present_status(agent_loop.status())
 
 
 @router.post("/control/start")
@@ -45,16 +47,19 @@ async def get_summary():
 
 @router.get("/live")
 async def get_live():
-    return agent_loop.live_view()
+    return present_live(
+        raw_status=agent_loop.status(),
+        market_summary=agent_loop.market_summary(),
+    )
 
 
 @router.get("/settings")
 async def get_settings():
     return {
         "symbol": agent_loop.symbol,
-        "ticker_options": agent_loop.ticker_options(),
+        "ticker_options": UISettingsService.ticker_options(),
         "bar_interval": agent_loop.bar_interval,
-        "options": agent_loop.bar_interval_options(),
+        "options": UISettingsService.bar_interval_options(),
     }
 
 

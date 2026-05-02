@@ -42,6 +42,7 @@ class AgentLoop:
         self._bar_task = None
         self._reconnect_lock = asyncio.Lock()
         self._reconnecting = False
+        self._ready = asyncio.Event()
         self._symbol: str = settings.ib_symbol
         self._state: Dict[str, Any] = {
             "last_run": None,
@@ -62,9 +63,6 @@ class AgentLoop:
     def bar_interval(self) -> str:
         return self._bar_data_source.bar_interval
 
-    def bar_interval_options(self):
-        return IBBarDataSource.supported_intervals()
-
     async def set_bar_interval(self, interval: str):
         self._bar_data_source.set_bar_interval(interval)
         self._market_store.bar_interval = interval
@@ -76,10 +74,6 @@ class AgentLoop:
     @property
     def symbol(self) -> str:
         return self._symbol
-
-    def ticker_options(self):
-        # Demo list; expand later (could come from config or a DB table)
-        return ["AAPL", "MSFT"]
 
     async def set_ticker(self, symbol: str):
         symbol = (symbol or "").strip().upper()
@@ -95,13 +89,13 @@ class AgentLoop:
     async def start(self):
         if self._running:
             return
+        self._ready.clear()
         self._running = True
         self._state["status"] = "running"
         self._state["last_error"] = None
         self._task = asyncio.create_task(self._loop())
-        # If startup fails immediately (e.g., IB connection/auth), surface it to API caller.
-        await asyncio.sleep(0.2)
-        if not self._running and self._state.get("last_error"):
+        await self._ready.wait()
+        if self._state.get("status") == "error" and self._state.get("last_error"):
             raise RuntimeError(self._state["last_error"])
 
     async def stop(self):
@@ -125,15 +119,18 @@ class AgentLoop:
             await self._market_data_source.connect()
             await self._bar_data_source.connect()
             self._start_worker_tasks()
+            self._ready.set()
 
             while self._running:
                 await asyncio.sleep(0.5)
         except asyncio.CancelledError:
+            self._ready.set()
             raise
         except Exception as exc:
             self._state["last_error"] = str(exc)
             self._state["status"] = "error"
             self._running = False
+            self._ready.set()
         finally:
             if self._tick_task:
                 self._tick_task.cancel()
@@ -311,21 +308,6 @@ class AgentLoop:
             "last_error": self._state.get("last_error"),
             "symbol": self.symbol,
             "bar_interval": self.bar_interval,
-        }
-
-    def live_view(self):
-        market = self._market_store.market_summary()
-        return {
-            "running": self._running,
-            "status": self._state["status"],
-            "last_error": self._state.get("last_error"),
-            "user_input": {
-                "ticker": self.symbol,
-                "interval": self.bar_interval,
-            },
-            "latest_price": market.get("latest_price"),
-            "tick": market.get("tick"),
-            "bar": market.get("bar"),
         }
 
     def market_summary(self):
