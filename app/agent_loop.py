@@ -5,11 +5,12 @@ from typing import Dict, Any, Optional
 from .core.config import settings
 from .db.tick_repository import SQLiteTickRepository
 from .db.bar_repository import SQLiteBarRepository
-from .services.data_store import MarketDataStore, NewsStore, HistoricalStore
+from .services.data_store import MarketDataStore, NewsStore, HistoricalStore, SignalStore
 from .services.agent import StrategySelectionAgent, ExecutionDecisionAgent
 from .services.market_data import IBConnection, IBMarketDataSource, IBBarDataSource
 from .services.rag import RAGService
-from .services.signals import SignalsEngine
+from .services.indicators import IndicatorEngine
+from .services.execution import ExecutionService
 
 
 class AgentLoop:
@@ -34,7 +35,9 @@ class AgentLoop:
         self._bar_data_source = self._create_bar_data_source("1m")
         self._news_store = NewsStore()
         self._history_store = HistoricalStore()
-        self._signals_engine = SignalsEngine()
+        self._signal_store = SignalStore()
+        self._indicator_engine = IndicatorEngine()
+        self._execution_service = ExecutionService()
         self._rag_service = RAGService(self._history_store)
         self._strategy_agent = StrategySelectionAgent()
         self._execution_agent = ExecutionDecisionAgent()
@@ -81,7 +84,7 @@ class AgentLoop:
             raise ValueError("Ticker cannot be empty")
         self._symbol = symbol
 
-        # For simplicity: if running, restart the IB connection to apply new contract.
+        # if running, restart the IB connection to apply new contract.
         if self._running:
             await self.stop()
             await self.start()
@@ -223,6 +226,7 @@ class AgentLoop:
             if bar and bar_ts and bar_ts != self._last_bar_timestamp:
                 self._market_store.update_bar(bar)
                 self._last_bar_timestamp = bar_ts
+                await self._strategy_cycle()
                 continue
 
             # Fallback: synthesize a bar so DB shows periodic updates in demo mode.
@@ -251,39 +255,41 @@ class AgentLoop:
             }
             self._market_store.update_bar(synthetic_bar)
             self._last_bar_timestamp = synthetic_ts
-            # Minimal test mode: skip strategy for now.
-            # await self._strategy_cycle()
+            await self._strategy_cycle()
 
     async def _strategy_cycle(self):
+        last_run = datetime.utcnow().isoformat()
+        calc_result = self._indicator_engine.calculate_all(self._market_store.current_bar)
+        indicators = calc_result.get("indicators", {})
+        signals = calc_result.get("signals", {})
+        self._signal_store.update(signals, indicators=indicators, last_run=last_run)
 
-        indicators = self._market_store.get_indicators()
-        signals = self._signals_engine.generate(indicators)
-        self._market_store.signals = signals 
-
-        market_summary = self._market_store.market_summary()
-        rag_context = self._rag_service.build_context(
-            market_summary=market_summary,
-            signals=signals
-        )
-
-        strategy = self._strategy_agent.select_strategy(
-            market_summary,
-            signals,
-            rag_context
-        )
-
-        decision = self._execution_agent.decide(
-            strategy,
-            signals,
-            rag_context
-        )
-
-        if decision["action"] != "hold":
-            self._market_store.execute_order(decision)
-
-        self._state["strategy"] = strategy
-        self._state["decision"] = decision
-        self._state["last_run"] = datetime.utcnow().isoformat()
+        # Indicator-focused mode:
+        # Temporarily disable strategy selection, decision making, and order execution.
+        # market_summary = self._market_store.market_summary()
+        # rag_context = self._rag_service.build_context(
+        #     market_summary=market_summary,
+        #     signals=signals
+        # )
+        #
+        # strategy = self._strategy_agent.select_strategy(
+        #     market_summary,
+        #     signals,
+        #     rag_context
+        # )
+        #
+        # decision = self._execution_agent.decide(
+        #     strategy,
+        #     signals,
+        #     rag_context
+        # )
+        #
+        # if decision["action"] != "hold":
+        #     self._execution_service.execute_order(decision)
+        #
+        # self._state["strategy"] = strategy
+        # self._state["decision"] = decision
+        self._state["last_run"] = last_run
 
     async def _sleep_until_next_bar_boundary(self):
         # Align bar loop to the selected interval boundary.
@@ -314,7 +320,7 @@ class AgentLoop:
         return self._market_store.market_summary()
 
     def signals_summary(self):
-        return self._market_store.signals_summary()
+        return self._signal_store.summary()
 
 
 agent_loop = AgentLoop()

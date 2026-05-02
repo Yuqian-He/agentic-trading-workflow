@@ -44,8 +44,23 @@
     }
     .subtle { color: var(--muted); font-size: 13px; margin: 0; }
     .row { display: grid; grid-template-columns: 120px 1fr; gap: 10px; align-items: center; margin-top: 12px; }
+    .rowTop { align-items: start; }
+    .groupBox {
+      margin-top: 12px;
+      padding: 10px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: rgba(0, 0, 0, 0.2);
+    }
+    .groupTitle {
+      margin: 0 0 8px 0;
+      font-size: 12px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.3px;
+    }
     label { color: var(--muted); font-size: 13px; }
-    select, button {
+    select, button, input {
       width: 100%;
       padding: 10px 10px;
       border-radius: 10px;
@@ -53,6 +68,21 @@
       background: #17243d;
       color: var(--text);
       outline: none;
+      box-sizing: border-box;
+      line-height: 1.2;
+      appearance: none;
+      -webkit-appearance: none;
+    }
+    select {
+      padding-right: 34px;
+      background-image:
+        linear-gradient(45deg, transparent 50%, #b8c7e4 50%),
+        linear-gradient(135deg, #b8c7e4 50%, transparent 50%);
+      background-position:
+        calc(100% - 16px) calc(50% - 2px),
+        calc(100% - 11px) calc(50% - 2px);
+      background-size: 5px 5px, 5px 5px;
+      background-repeat: no-repeat;
     }
     button {
       cursor: pointer;
@@ -117,6 +147,34 @@
     .k { color: var(--muted); }
     .v { color: var(--text); word-break: break-word; }
     .liveWide { grid-column: 1 / -1; }
+    .indicatorList {
+      display: grid;
+      gap: 10px;
+    }
+    .indicatorCard {
+      background: rgba(0,0,0,0.28);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 10px;
+    }
+    .indicatorHead {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 10px;
+      margin-bottom: 6px;
+    }
+    .indicatorName {
+      font-size: 13px;
+      color: var(--text);
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.3px;
+    }
+    .indicatorRun {
+      font-size: 11px;
+      color: var(--muted);
+    }
     select option {
       color: #101727;
       background: #f5f8ff;
@@ -176,6 +234,76 @@
         <button id="btn-start">Start</button>
         <button id="btn-stop" class="secondary">Stop</button>
       </div>
+
+      <div class="groupBox">
+        <p class="groupTitle">SMA Input</p>
+        <div class="row">
+          <label for="sma-source">Source</label>
+          <select id="sma-source">
+            <option value="close">Close</option>
+            <option value="open">Open</option>
+            <option value="high">High</option>
+            <option value="low">Low</option>
+            <option value="hl2">HL2</option>
+            <option value="ohlc4">OHLC4</option>
+          </select>
+        </div>
+        <div class="row">
+          <label for="sma-length">Length</label>
+          <input id="sma-length" type="number" min="1" step="1" value="20" />
+        </div>
+        <div class="row">
+          <label for="sma-timeframe">Timeframe</label>
+          <select id="sma-timeframe">
+            <option value="chart">Chart</option>
+            <option value="1m">1m</option>
+            <option value="3m">3m</option>
+            <option value="5m">5m</option>
+            <option value="15m">15m</option>
+            <option value="30m">30m</option>
+            <option value="1H">1H</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="groupBox">
+        <p class="groupTitle">RSI Input</p>
+        <div class="row">
+          <label for="rsi-length">Length</label>
+          <input id="rsi-length" type="number" min="1" step="1" value="14" />
+        </div>
+        <div class="row">
+          <label for="rsi-source">Source</label>
+          <select id="rsi-source">
+            <option value="close">Close</option>
+            <option value="open">Open</option>
+            <option value="high">High</option>
+            <option value="low">Low</option>
+            <option value="hl2">HL2</option>
+            <option value="ohlc4">OHLC4</option>
+          </select>
+        </div>
+        <div class="row">
+          <label for="rsi-overbought">Overbought</label>
+          <input id="rsi-overbought" type="number" min="1" max="100" step="1" value="70" />
+        </div>
+        <div class="row">
+          <label for="rsi-oversold">Oversold</label>
+          <input id="rsi-oversold" type="number" min="1" max="100" step="1" value="30" />
+        </div>
+        <div class="row">
+          <label for="rsi-timeframe">Timeframe</label>
+          <select id="rsi-timeframe">
+            <option value="chart">Chart</option>
+            <option value="1m">1m</option>
+            <option value="3m">3m</option>
+            <option value="5m">5m</option>
+            <option value="15m">15m</option>
+            <option value="30m">30m</option>
+            <option value="1H">1H</option>
+          </select>
+        </div>
+      </div>
     </div>
 
     <div class="stack">
@@ -186,9 +314,23 @@
 
       <div class="card">
         <p class="sectionTitle">Indicators (all enabled)</p>
-        <div id="indicators">
-          <span class="pill">SMA</span>
-          <span class="pill">RSI</span>
+        <div id="indicators" class="indicatorList">
+          <div class="indicatorCard">
+            <div class="indicatorHead">
+              <div class="indicatorName">SMA</div>
+              <div class="indicatorRun">Last run: -</div>
+            </div>
+            <div class="kv"><div class="k">Value</div><div class="v">-</div></div>
+            <div class="kv"><div class="k">Signal</div><div class="v">-</div></div>
+          </div>
+          <div class="indicatorCard">
+            <div class="indicatorHead">
+              <div class="indicatorName">RSI</div>
+              <div class="indicatorRun">Last run: -</div>
+            </div>
+            <div class="kv"><div class="k">Value</div><div class="v">-</div></div>
+            <div class="kv"><div class="k">Signal</div><div class="v">-</div></div>
+          </div>
         </div>
       </div>
 

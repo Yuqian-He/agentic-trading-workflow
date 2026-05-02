@@ -50,6 +50,7 @@ async def get_live():
     return present_live(
         raw_status=agent_loop.status(),
         market_summary=agent_loop.market_summary(),
+        signals_summary=agent_loop.signals_summary(),
     )
 
 

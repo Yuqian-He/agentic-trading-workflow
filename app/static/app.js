@@ -6,11 +6,24 @@ const logEl = document.getElementById('log');
 const tickerSelect = document.getElementById('ticker');
 const barIntervalSelect = document.getElementById('bar-interval');
 const sessionEl = document.getElementById('session');
+const indicatorsEl = document.getElementById('indicators');
+const smaSourceSelect = document.getElementById('sma-source');
+const smaLengthInput = document.getElementById('sma-length');
+const smaTimeframeSelect = document.getElementById('sma-timeframe');
+const rsiLengthInput = document.getElementById('rsi-length');
+const rsiSourceSelect = document.getElementById('rsi-source');
+const rsiOverboughtInput = document.getElementById('rsi-overbought');
+const rsiOversoldInput = document.getElementById('rsi-oversold');
+const rsiTimeframeSelect = document.getElementById('rsi-timeframe');
 const logBuffer = [];
 const DEFAULT_TICKERS = ['AAPL', 'MSFT'];
 const DEFAULT_INTERVALS = ['1m', '3m', '5m', '15m', '30m', '45m', '1H', '2H', '3H', '4H'];
 let lastSeenLoopStatus = null;
 let lastSeenLoopError = null;
+const INDICATOR_SIGNAL_MAP = {
+  sma: 'sma_signal',
+  rsi: 'rsi_signal',
+};
 
 function setBusy(isBusy) {
   if (startBtn) startBtn.disabled = isBusy;
@@ -71,6 +84,69 @@ function renderSession({ symbol, bar_interval }) {
     <div class="pill">Ticker: ${symbol ?? '-'}</div>
     <div class="pill">Interval: ${bar_interval ?? '-'}</div>
   `;
+}
+
+function formatLastRun(rawTs) {
+  if (!rawTs) return '-';
+  const dt = new Date(rawTs);
+  if (Number.isNaN(dt.getTime())) return String(rawTs);
+  return dt.toLocaleString();
+}
+
+function renderIndicators(live) {
+  if (!indicatorsEl) return;
+  const summary = live?.signals_summary || {};
+  const indicators = summary?.indicators || {};
+  const signals = summary?.signals || {};
+  const lastRun = formatLastRun(summary?.last_run || live?.last_run);
+  const keys = Object.keys(indicators);
+
+  if (keys.length === 0) {
+    indicatorsEl.innerHTML = `
+      <div class="indicatorCard">
+        <div class="indicatorHead">
+          <div class="indicatorName">NO DATA</div>
+          <div class="indicatorRun">Last run: ${lastRun}</div>
+        </div>
+        <div class="kv"><div class="k">Value</div><div class="v">-</div></div>
+        <div class="kv"><div class="k">Signal</div><div class="v">-</div></div>
+      </div>
+    `;
+    return;
+  }
+
+  indicatorsEl.innerHTML = keys
+    .map((name) => {
+      const signalKey = INDICATOR_SIGNAL_MAP[name] || `${name}_signal`;
+      return `
+        <div class="indicatorCard">
+          <div class="indicatorHead">
+            <div class="indicatorName">${String(name).toUpperCase()}</div>
+            <div class="indicatorRun">Last run: ${lastRun}</div>
+          </div>
+          <div class="kv"><div class="k">Value</div><div class="v">${indicators[name] ?? '-'}</div></div>
+          <div class="kv"><div class="k">Signal</div><div class="v">${signals[signalKey] ?? '-'}</div></div>
+        </div>
+      `;
+    })
+    .join('');
+}
+
+function getIndicatorInputs() {
+  return {
+    sma: {
+      source: smaSourceSelect?.value ?? 'close',
+      length: Number(smaLengthInput?.value ?? 20),
+      timeframe: smaTimeframeSelect?.value ?? 'chart',
+    },
+    rsi: {
+      length: Number(rsiLengthInput?.value ?? 14),
+      source: rsiSourceSelect?.value ?? 'close',
+      overbought: Number(rsiOverboughtInput?.value ?? 70),
+      oversold: Number(rsiOversoldInput?.value ?? 30),
+      timeframe: rsiTimeframeSelect?.value ?? 'chart',
+    },
+  };
 }
 
 function normalizeOptions(raw, fallback = []) {
@@ -169,6 +245,7 @@ async function updateLive() {
       lastSeenLoopError = live.last_error;
     }
     output.innerHTML = formatLiveData(live);
+    renderIndicators(live);
   } catch (err) {
     appendLog(`live data update failed: ${err.message}`);
   }
@@ -184,8 +261,10 @@ function renderUserSelectionPreview() {
     },
     tick: {},
     bar: {},
+    signals_summary: {},
   };
   output.innerHTML = formatLiveData(preview);
+  renderIndicators(preview);
 }
 
 if (tickerSelect) {
@@ -201,6 +280,22 @@ if (barIntervalSelect) {
     renderUserSelectionPreview();
   });
 }
+
+[
+  smaSourceSelect,
+  smaLengthInput,
+  smaTimeframeSelect,
+  rsiLengthInput,
+  rsiSourceSelect,
+  rsiOverboughtInput,
+  rsiOversoldInput,
+  rsiTimeframeSelect,
+].forEach((el) => {
+  if (!el) return;
+  el.addEventListener('change', () => {
+    appendLog(`indicator input updated: ${JSON.stringify(getIndicatorInputs())}`);
+  });
+});
 
 async function updateSettings() {
   if (tickerSelect && tickerSelect.options.length === 0) {
@@ -258,6 +353,7 @@ async function handleStartClick() {
   setBusy(true);
   try {
     appendLog(`start requested: applying ${tickerSelect?.value} / ${barIntervalSelect?.value}`);
+    appendLog(`indicator inputs: ${JSON.stringify(getIndicatorInputs())}`);
     renderUserSelectionPreview();
     await applySelections();
     appendLog('settings applied, starting loop');

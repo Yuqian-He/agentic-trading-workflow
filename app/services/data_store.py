@@ -29,7 +29,6 @@ class MarketDataStore:
             "source": None,
         }
         self.current_bar: Optional[Dict[str, Any]] = None
-        self.signals = {"sma": None, "rsi": None}
         self.tick_repository = tick_repository
         self.bar_repository = bar_repository
         self.bar_interval = bar_interval
@@ -59,17 +58,6 @@ class MarketDataStore:
             self.bar_repository.save_bar(bar, interval=self.bar_interval)
         return bar
 
-    def get_indicators(self):
-        if not self.current_bar:
-            return {"sma": 100.0, "rsi": 50.0}
-
-        close_price = self.current_bar.get("close", 0.0)
-        # TODO: Replace with real indicator calculation using bar history.
-        return {"sma": close_price, "rsi": 50.0}
-
-    def current_signals(self):
-        return self.signals
-
     def market_summary(self):
         latest_price = None
         if self.current_bar and self.current_bar.get("close") is not None:
@@ -84,13 +72,6 @@ class MarketDataStore:
             "bar": self.current_bar,
         }
 
-    def signals_summary(self):
-        return self.signals
-
-    def execute_order(self, decision: Dict[str, Any]):
-        # TODO: Implement simulated or IB order execution.
-        print(f"Executing order: {decision}")
-
 
 class NewsStore:
     def __init__(self):
@@ -102,6 +83,28 @@ class NewsStore:
 
     def recent(self):
         return self.latest_news
+
+
+class SignalStore:
+    def __init__(self):
+        self._signals: Dict[str, Any] = {}
+        self._indicators: Dict[str, Any] = {}
+        self._last_run: Optional[str] = None
+
+    def update(self, signals: Dict[str, Any], indicators: Optional[Dict[str, Any]] = None, last_run: Optional[str] = None) -> Dict[str, Any]:
+        self._signals = dict(signals or {})
+        if indicators is not None:
+            self._indicators = dict(indicators or {})
+        if last_run is not None:
+            self._last_run = last_run
+        return self._signals
+
+    def summary(self) -> Dict[str, Any]:
+        return {
+            "signals": dict(self._signals),
+            "indicators": dict(self._indicators),
+            "last_run": self._last_run,
+        }
 
 
 class HistoricalStore:
