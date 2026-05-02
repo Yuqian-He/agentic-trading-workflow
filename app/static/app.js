@@ -50,7 +50,18 @@ function appendLog(message) {
   const ts = new Date().toLocaleTimeString();
   logBuffer.push(`[${ts}] ${message}`);
   if (logBuffer.length > 200) logBuffer.shift();
-  logEl.textContent = logBuffer.join('\n');
+  const rendered = logBuffer
+    .map((line) => {
+      const escaped = line
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+      const isErrorLine = /\berror\b|failed|timeout/i.test(line);
+      const cls = isErrorLine ? 'logLine logError' : 'logLine';
+      return `<div class="${cls}">${escaped}</div>`;
+    })
+    .join('');
+  logEl.innerHTML = rendered;
   logEl.scrollTop = logEl.scrollHeight;
 }
 
@@ -115,7 +126,6 @@ function formatLiveData(live) {
   const interval = live?.user_input?.interval ?? '-';
   const running = live?.status ?? (live?.running ? 'running' : 'stopped');
   const latestPrice = live?.latest_price ?? '-';
-  const lastError = live?.last_error ?? '-';
 
   const bidAsk = `${tick.bid ?? '-'} / ${tick.ask ?? '-'}`;
   const ohlc = `${bar.open ?? '-'} / ${bar.high ?? '-'} / ${bar.low ?? '-'} / ${bar.close ?? '-'}`;
@@ -125,7 +135,6 @@ function formatLiveData(live) {
       <div class="kv"><div class="k">Ticker</div><div class="v">${ticker}</div></div>
       <div class="kv"><div class="k">Interval</div><div class="v">${interval}</div></div>
       <div class="kv"><div class="k">Status</div><div class="v">${running}</div></div>
-      <div class="kv"><div class="k">Last Error</div><div class="v">${lastError}</div></div>
       <div class="kv"><div class="k">Latest Px</div><div class="v">${latestPrice}</div></div>
     </div>
     <div class="liveBlock">
