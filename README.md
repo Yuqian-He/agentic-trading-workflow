@@ -31,21 +31,57 @@ http://127.0.0.1:8000
 
 ```mermaid
 graph TD
-    A[Market Data<br/>Ticks / Bars] --> B[Indicators<br/>SMA / RSI]
-    B --> C[Signals Engine]
-    C --> D[Context Builder]
-    D --> E[Strategy Selection Agent]
-    E --> F[Execution Decision Agent]
-    F --> G{Action?}
-    G -->|Hold / Skip| H[Update Agent State]
-    G -->|Execute| I[Execution Layer<br/>Simulation / Broker]
-    I --> H
-    H --> A
+    A[Market Data<br/>tick / bar / orderbook] --> G1
+    D[Historical Data<br/>OHLCV / indicators history] --> G1
+    E[News Data<br/>headlines / article text / events] --> G1
 
-    D --> D1[Market Summary]
-    D --> D2[Signals Summary]
-    D --> D3[Historical RAG]
-    D --> D4[News RAG]
+    subgraph L1[G1 Feature Layer - Fact Description Only]
+        G1[Build Structured Features<br/>No AI in this layer]
+        G1IN["Input (raw):<br/>tick, bar, RSI, SMA, news text"]
+        G1OUT["Output (features):<br/>{trend, rsi, rsi_state,<br/>volume_spike, news_sentiment}"]
+        G1NOTE["Responsibility:<br/>Describe what is happening now.<br/>No buy/sell judgment."]
+        G1IN --> G1
+        G1 --> G1OUT
+        G1 --> G1NOTE
+    end
+
+    subgraph L2[G2 Signal Layer - Strategy-Oriented Signals]
+        G2[Generate Signal Candidates<br/>Rule/Model Based, Not Final Decision]
+        G2IN["Input:<br/>G1 structured features"]
+        G2OUT["Output (signals):<br/>{mean_reversion_signal,<br/>trend_follow_signal,<br/>breakout_signal}"]
+        G2NOTE["Responsibility:<br/>Map features to strategy tendencies.<br/>Still not an execution decision."]
+        G2IN --> G2
+        G2 --> G2OUT
+        G2 --> G2NOTE
+    end
+
+    subgraph L3[G3 Hypothesis Layer - Market Story Synthesis]
+        G3[Build Market Hypothesis Context]
+        G3IN["Input:<br/>G2 signals + G1 features"]
+        G3OUT["Output (hypothesis):<br/>{market_regime,<br/>dominant_logic,<br/>risk, confidence}"]
+        G3NOTE["Responsibility:<br/>Explain what market is doing,<br/>why it moves, where risk is."]
+        G3IN --> G3
+        G3 --> G3OUT
+        G3 --> G3NOTE
+    end
+
+    subgraph AI[AI Reasoning and Action]
+        H[H AI Reasoning<br/>Interpret G3 and choose strategy]
+        HIN["Input:<br/>G3 market hypothesis"]
+        HOUT["Output:<br/>{selected_strategy, reason}"]
+        I[I Strategy Agent<br/>Deterministic / Semi-rule Execution Plan]
+        IOUT["Output:<br/>{action, entry, stop_loss, take_profit}"]
+        J[J Execution Decision<br/>Risk + Account + Permission Checks]
+        JOUT["Output:<br/>approve_order / reject_order / hold"]
+        HIN --> H
+        H --> HOUT
+        HOUT --> I
+        I --> IOUT
+        IOUT --> J
+        J --> JOUT
+    end
+
+    G1 --> G2
+    G2 --> G3
+    G3 --> H
 ```
-
-
