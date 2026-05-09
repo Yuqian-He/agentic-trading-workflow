@@ -35,10 +35,12 @@ http://127.0.0.1:8000
 graph TD
     A[Market Data] --> G1[Feature Layer]
     D[Historical Data] --> G1
-    E[News Data] --> G1
+    E[News Raw] --> N1[NLP Processor]
+    N1 --> G1
     G1 --> G2[Signal Layer]
     G2 --> G3[Hypothesis Layer]
-    G3 --> H[AI Reasoning]
+    G3 --> S[State Manager]
+    S --> H[AI Reasoning]
     H --> I[Strategy Agent]
     I --> J[Execution Decision]
 ```
@@ -49,7 +51,7 @@ graph TD
 graph LR
     A[Market tick/bar/orderbook] --> G1
     D[Historical OHLCV + indicators] --> G1
-    E[News text/events] --> G1
+    N1[News NLP output<br/>sentiment / topic / entities] --> G1
 
     G1[Build Structured Features<br/>Describe facts only] --> O1["trend"]
     G1 --> O2["rsi / sma / volatility"]
@@ -57,14 +59,27 @@ graph LR
     G1 --> O4["news_sentiment"]
 ```
 
+### 2.1) News NLP Processor (Outside G1)
+
+```mermaid
+graph LR
+    E[News raw text/events] --> N1[NLP Processor<br/>LLM or NLP model]
+    N1 --> N2["sentiment score/label"]
+    N1 --> N3["topics / entities"]
+    N1 --> N4["event impact tags"]
+    N2 --> G1IN[Feed into G1 as ready features]
+    N3 --> G1IN
+    N4 --> G1IN
+```
+
 ### 3) G2 Signal Layer
 
 ```mermaid
 graph LR
     F1["trend, rsi_state, volume_spike, sentiment"] --> G2
-    G2[Map Features to Strategy Signals] --> S1["mean_reversion_signal"]
-    G2 --> S2["trend_follow_signal"]
-    G2 --> S3["breakout_signal"]
+    G2[Map Features to Explainable Signals] --> S1["mean_reversion_signal: {score, drivers[]}"]
+    G2 --> S2["trend_follow_signal: {score, drivers[]}"]
+    G2 --> S3["breakout_signal: {score, drivers[]}"]
     N[Not a final trade decision] --> G2
 ```
 
@@ -80,11 +95,23 @@ graph LR
     G3 --> H4["confidence"]
 ```
 
+### 4.1) State Manager (Temporal Smoothing)
+
+```mermaid
+graph LR
+    G3O[Per-frame hypothesis] --> S
+    M[Previous state memory] --> S
+    S[State Manager<br/>debounce + persistence] --> O1["current_regime"]
+    S --> O2["regime_duration"]
+    S --> O3["stability"]
+    S --> O4["switch_allowed flag"]
+```
+
 ### 5) H AI Reasoning
 
 ```mermaid
 graph LR
-    G3O[Hypothesis Context] --> H
+    G3O[Hypothesis + state context] --> H
     H[AI Reasoning<br/>Interpret and choose strategy] --> R1["selected_strategy"]
     H --> R2["reason"]
 ```
@@ -102,3 +129,15 @@ graph LR
     J --> X2["reject_order"]
     J --> X3["hold"]
 ```
+
+## Layer-to-Tech Mapping
+
+| Layer | Core Purpose | Typical Implementation |
+|---|---|---|
+| G1 Feature Layer | Feature extraction | pandas / TA libraries |
+| G2 Signal Layer | Signal scoring | deterministic rules / ML model |
+| G3 Hypothesis Layer | Market modeling | hybrid logic |
+| State Manager | Temporal smoothing | state machine / debounce logic |
+| H AI Reasoning | Decision reasoning | LLM |
+| I Strategy Agent | Trade logic generation | deterministic / semi-rule |
+| J Execution Decision | Trade permission checks | risk engine + account checks |
