@@ -29,59 +29,76 @@ http://127.0.0.1:8000
 
 ## Workflow Diagram
 
+### 1) End-to-End Overview
+
 ```mermaid
 graph TD
-    A[Market Data<br/>tick / bar / orderbook] --> G1
-    D[Historical Data<br/>OHLCV / indicators history] --> G1
-    E[News Data<br/>headlines / article text / events] --> G1
+    A[Market Data] --> G1[Feature Layer]
+    D[Historical Data] --> G1
+    E[News Data] --> G1
+    G1 --> G2[Signal Layer]
+    G2 --> G3[Hypothesis Layer]
+    G3 --> H[AI Reasoning]
+    H --> I[Strategy Agent]
+    I --> J[Execution Decision]
+```
 
-    subgraph L1[G1 Feature Layer - Fact Description Only]
-        G1[Build Structured Features<br/>No AI in this layer]
-        G1IN["Input (raw):<br/>tick, bar, RSI, SMA, news text"]
-        G1OUT["Output (features):<br/>{trend, rsi, rsi_state,<br/>volume_spike, news_sentiment}"]
-        G1NOTE["Responsibility:<br/>Describe what is happening now.<br/>No buy/sell judgment."]
-        G1IN --> G1
-        G1 --> G1OUT
-        G1 --> G1NOTE
-    end
+### 2) G1 Feature Layer (No AI)
 
-    subgraph L2[G2 Signal Layer - Strategy-Oriented Signals]
-        G2[Generate Signal Candidates<br/>Rule/Model Based, Not Final Decision]
-        G2IN["Input:<br/>G1 structured features"]
-        G2OUT["Output (signals):<br/>{mean_reversion_signal,<br/>trend_follow_signal,<br/>breakout_signal}"]
-        G2NOTE["Responsibility:<br/>Map features to strategy tendencies.<br/>Still not an execution decision."]
-        G2IN --> G2
-        G2 --> G2OUT
-        G2 --> G2NOTE
-    end
+```mermaid
+graph LR
+    A[Market tick/bar/orderbook] --> G1
+    D[Historical OHLCV + indicators] --> G1
+    E[News text/events] --> G1
 
-    subgraph L3[G3 Hypothesis Layer - Market Story Synthesis]
-        G3[Build Market Hypothesis Context]
-        G3IN["Input:<br/>G2 signals + G1 features"]
-        G3OUT["Output (hypothesis):<br/>{market_regime,<br/>dominant_logic,<br/>risk, confidence}"]
-        G3NOTE["Responsibility:<br/>Explain what market is doing,<br/>why it moves, where risk is."]
-        G3IN --> G3
-        G3 --> G3OUT
-        G3 --> G3NOTE
-    end
+    G1[Build Structured Features<br/>Describe facts only] --> O1["trend"]
+    G1 --> O2["rsi / sma / volatility"]
+    G1 --> O3["rsi_state / volume_spike"]
+    G1 --> O4["news_sentiment"]
+```
 
-    subgraph AI[AI Reasoning and Action]
-        H[H AI Reasoning<br/>Interpret G3 and choose strategy]
-        HIN["Input:<br/>G3 market hypothesis"]
-        HOUT["Output:<br/>{selected_strategy, reason}"]
-        I[I Strategy Agent<br/>Deterministic / Semi-rule Execution Plan]
-        IOUT["Output:<br/>{action, entry, stop_loss, take_profit}"]
-        J[J Execution Decision<br/>Risk + Account + Permission Checks]
-        JOUT["Output:<br/>approve_order / reject_order / hold"]
-        HIN --> H
-        H --> HOUT
-        HOUT --> I
-        I --> IOUT
-        IOUT --> J
-        J --> JOUT
-    end
+### 3) G2 Signal Layer
 
-    G1 --> G2
-    G2 --> G3
-    G3 --> H
+```mermaid
+graph LR
+    F1["trend, rsi_state, volume_spike, sentiment"] --> G2
+    G2[Map Features to Strategy Signals] --> S1["mean_reversion_signal"]
+    G2 --> S2["trend_follow_signal"]
+    G2 --> S3["breakout_signal"]
+    N[Not a final trade decision] --> G2
+```
+
+### 4) G3 Hypothesis Layer
+
+```mermaid
+graph LR
+    G1F[G1 Features] --> G3
+    G2S[G2 Signals] --> G3
+    G3[Build Market Hypothesis] --> H1["market_regime"]
+    G3 --> H2["dominant_logic"]
+    G3 --> H3["risk"]
+    G3 --> H4["confidence"]
+```
+
+### 5) H AI Reasoning
+
+```mermaid
+graph LR
+    G3O[Hypothesis Context] --> H
+    H[AI Reasoning<br/>Interpret and choose strategy] --> R1["selected_strategy"]
+    H --> R2["reason"]
+```
+
+### 6) I + J Execution Path
+
+```mermaid
+graph LR
+    HOUT["selected_strategy + reason"] --> I
+    I[Strategy Agent<br/>Deterministic / Semi-rule] --> P1["action"]
+    I --> P2["entry / stop_loss / take_profit"]
+    P2 --> J
+    P1 --> J
+    J[Execution Decision<br/>Risk / account / permission checks] --> X1["approve_order"]
+    J --> X2["reject_order"]
+    J --> X3["hold"]
 ```
