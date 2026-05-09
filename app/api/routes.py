@@ -4,10 +4,13 @@ from pydantic import BaseModel
 
 from ..agent_loop import agent_loop
 from ..models.schemas import AgentStatus
-from ..presenters.live_presenter import present_live, present_status
+from ..presenters.agent_presenter import AgentPresenter
+from ..services.agent_controller import AgentController
 from ..services.ui_settings import UISettingsService
 
 router = APIRouter()
+presenter = AgentPresenter(agent_loop)
+controller = AgentController(agent_loop)
 
 
 class BarIntervalRequest(BaseModel):
@@ -25,13 +28,13 @@ class IndicatorInputsRequest(BaseModel):
 
 @router.get("/status", response_model=AgentStatus)
 async def get_status():
-    return present_status(agent_loop.status())
+    return presenter.status()
 
 
 @router.post("/control/start")
 async def start_loop():
     try:
-        await agent_loop.start()
+        await controller.start()
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to start loop: {exc}")
     return JSONResponse({"detail": "Agent loop started"})
@@ -39,24 +42,21 @@ async def start_loop():
 
 @router.post("/control/stop")
 async def stop_loop():
-    await agent_loop.stop()
+    await controller.stop()
     return JSONResponse({"detail": "Agent loop stopped"})
 
 
 @router.get("/summary")
 async def get_summary():
     return {
-        "market_summary": agent_loop.market_summary(),
-        "signals_summary": agent_loop.signals_summary(),
+        "market_summary": presenter.market_summary(),
+        "signals_summary": presenter.signals_summary(),
+        "features_summary": presenter.features_summary(),
     }
 
 @router.get("/live")
 async def get_live():
-    return present_live(
-        raw_status=agent_loop.status(),
-        market_summary=agent_loop.market_summary(),
-        signals_summary=agent_loop.signals_summary(),
-    )
+    return presenter.live()
 
 
 @router.get("/settings")
@@ -73,7 +73,7 @@ async def get_settings():
 @router.post("/settings/bar-interval")
 async def set_bar_interval(request: BarIntervalRequest):
     try:
-        await agent_loop.set_bar_interval(request.interval)
+        await controller.set_interval(request.interval)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
@@ -84,7 +84,7 @@ async def set_bar_interval(request: BarIntervalRequest):
 @router.post("/settings/ticker")
 async def set_ticker(request: TickerRequest):
     try:
-        await agent_loop.set_ticker(request.symbol)
+        await controller.set_ticker(request.symbol)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
@@ -96,7 +96,7 @@ async def set_ticker(request: TickerRequest):
 async def set_indicator_inputs(request: IndicatorInputsRequest):
     try:
         payload = request.model_dump() if hasattr(request, "model_dump") else request.dict()
-        await agent_loop.set_indicator_inputs(payload)
+        await controller.set_indicator_inputs(payload)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to update indicator inputs: {exc}")
     return JSONResponse({"detail": "Indicator inputs updated", "indicator_inputs": agent_loop.indicator_inputs()})

@@ -48,9 +48,9 @@ class IndicatorEngine:
 
     def calculate_all(self, current_bar: Optional[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
         indicators: Dict[str, Any] = {}
-        signals: Dict[str, Any] = {}
+        features: Dict[str, Any] = {}
         if not self._indicator_handlers:
-            return {"indicators": indicators, "signals": signals}
+            return {"indicators": indicators, "features": features}
 
         with ThreadPoolExecutor(max_workers=len(self._indicator_handlers)) as executor:
             future_map = {
@@ -62,6 +62,6 @@ class IndicatorEngine:
                 indicator_name = future_map[future]
                 indicator_value, signal_value = future.result()
                 indicators[indicator_name] = indicator_value
-                signals[f"{indicator_name}_signal"] = signal_value
+                features[f"{indicator_name}_state"] = signal_value
 
-        return {"indicators": indicators, "signals": signals}
+        return {"indicators": indicators, "features": features}

@@ -1,7 +1,7 @@
 import asyncio
 import math
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional, Protocol
+from typing import Any, Dict, List, Optional, Protocol
 
 
 class MarketDataSource(Protocol):
@@ -202,6 +202,38 @@ class IBBarDataSource:
             "source": "ib_delayed_historical_bar",
         }
 
+    async def fetch_recent_bars(self, limit: int = 500) -> List[Dict[str, Any]]:
+        if not self.ib_connection.ib or not self.ib_connection.contract:
+            raise RuntimeError("IB bar data source is not connected.")
+
+        bars = await self.ib_connection.ib.reqHistoricalDataAsync(
+            self.ib_connection.contract,
+            endDateTime="",
+            durationStr=self._duration_str_for_interval(),
+            barSizeSetting=self.bar_size_setting,
+            whatToShow="TRADES",
+            useRTH=False,
+            formatDate=1,
+            keepUpToDate=False,
+        )
+        if not bars:
+            return []
+        result: List[Dict[str, Any]] = []
+        for bar in bars[-max(1, int(limit)) :]:
+            result.append(
+                {
+                    "symbol": self.ib_connection.contract.symbol,
+                    "open": self._to_float(bar.open),
+                    "high": self._to_float(bar.high),
+                    "low": self._to_float(bar.low),
+                    "close": self._to_float(bar.close),
+                    "volume": int(bar.volume or 0),
+                    "timestamp": self._timestamp_to_iso(bar.date),
+                    "source": "ib_delayed_historical_bar",
+                }
+            )
+        return result
+
     @staticmethod
     def _timestamp_to_iso(value):
         if value is None:
@@ -340,3 +372,97 @@ def _min_opt(a, b):
     if b is None:
         return a
     return min(a, b)
+
+
+class BarAggregator:
+    """Aggregate base-interval bars into higher intervals."""
+
+    def __init__(self, base_interval: str = "1m"):
+        self.base_interval = base_interval
+        self._state: Dict[str, Dict[str, Any]] = {}
+
+    def reset(self) -> None:
+        self._state.clear()
+
+    def push(self, bar: Dict[str, Any], target_intervals: List[str]) -> List[Dict[str, Any]]:
+        emitted: List[Dict[str, Any]] = []
+        for interval in target_intervals:
+            if interval == self.base_interval:
+                emitted.append({"interval": interval, "bar": dict(bar)})
+                continue
+            built = self._push_one(bar, interval)
+            if built is not None:
+                emitted.append({"interval": interval, "bar": built})
+        return emitted
+
+    def _push_one(self, bar: Dict[str, Any], interval: str) -> Optional[Dict[str, Any]]:
+        target_seconds = IBBarDataSource.interval_seconds(interval)
+        ts = self._parse_ts(bar.get("timestamp"))
+        if ts is None:
+            return None
+        epoch = int(ts.timestamp())
+        bucket_start = (epoch // target_seconds) * target_seconds
+
+        state = self._state.get(interval)
+        if state is None:
+            self._state[interval] = self._new_bucket(bar, bucket_start)
+            return None
+
+        if bucket_start != state["bucket_start"]:
+            finished = self._to_output_bar(state)
+            self._state[interval] = self._new_bucket(bar, bucket_start)
+            return finished
+
+        self._merge(state, bar)
+        return None
+
+    def _new_bucket(self, bar: Dict[str, Any], bucket_start: int) -> Dict[str, Any]:
+        return {
+            "bucket_start": bucket_start,
+            "symbol": bar.get("symbol"),
+            "open": bar.get("open"),
+            "high": bar.get("high"),
+            "low": bar.get("low"),
+            "close": bar.get("close"),
+            "volume": bar.get("volume") or 0,
+            "source": f"aggregated_from_{self.base_interval}",
+        }
+
+    def _merge(self, state: Dict[str, Any], bar: Dict[str, Any]) -> None:
+        state["high"] = _max_opt(self._to_float(state.get("high")), self._to_float(bar.get("high")))
+        state["low"] = _min_opt(self._to_float(state.get("low")), self._to_float(bar.get("low")))
+        state["close"] = bar.get("close")
+        state["volume"] = (state.get("volume") or 0) + (bar.get("volume") or 0)
+
+    def _to_output_bar(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "symbol": state.get("symbol"),
+            "open": state.get("open"),
+            "high": state.get("high"),
+            "low": state.get("low"),
+            "close": state.get("close"),
+            "volume": state.get("volume"),
+            "timestamp": datetime.fromtimestamp(int(state["bucket_start"]), tz=timezone.utc).isoformat(),
+            "source": state.get("source"),
+        }
+
+    @staticmethod
+    def _parse_ts(value: Any) -> Optional[datetime]:
+        if value is None:
+            return None
+        try:
+            ts = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            if ts.tzinfo is None:
+                return ts.replace(tzinfo=timezone.utc)
+            return ts.astimezone(timezone.utc)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _to_float(value: Any) -> Optional[float]:
+        try:
+            if value is None:
+                return None
+            return float(value)
+        except Exception:
+            return None

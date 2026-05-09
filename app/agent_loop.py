@@ -1,4 +1,5 @@
 import asyncio
+import traceback
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional
 
@@ -6,16 +7,18 @@ from .core.config import settings
 from .db.tick_repository import SQLiteTickRepository
 from .db.bar_repository import SQLiteBarRepository
 from .db.indicator_settings_repository import SQLiteIndicatorSettingsRepository
-from .services.data_store import MarketDataStore, NewsStore, HistoricalStore, SignalStore
+from .services.data_store import MarketDataStore, NewsStore, HistoricalStore, SignalStore, FeatureStore
 from .services.agent import StrategySelectionAgent, ExecutionDecisionAgent
-from .services.market_data import IBConnection, IBMarketDataSource, IBBarDataSource
+from .services.market_data import IBConnection, IBMarketDataSource, IBBarDataSource, BarAggregator
 from .services.rag import RAGService
 from .services.indicators import IndicatorEngine
+from .services.feature_builder import FeatureBuilder
 from .services.execution import ExecutionService
 
 
 class AgentLoop:
     def __init__(self):
+        self._base_bar_interval = "1m"
         self._task = None
         self._running = False
         self._market_store = MarketDataStore(
@@ -33,12 +36,15 @@ class AgentLoop:
             ib_connection=self._ib_connection,
             market_data_type=settings.ib_market_data_type,
         )
-        self._bar_data_source = self._create_bar_data_source("1m")
+        self._bar_data_source = self._create_bar_data_source(self._base_bar_interval)
+        self._bar_aggregator = BarAggregator(base_interval=self._base_bar_interval)
         self._indicator_settings_repo = SQLiteIndicatorSettingsRepository(settings.bar_db_path)
         self._news_store = NewsStore()
         self._history_store = HistoricalStore()
         self._signal_store = SignalStore()
-        self._indicator_engine = IndicatorEngine(bar_fetcher=self._fetch_recent_bars)
+        self._feature_store = FeatureStore()
+        self._indicator_engine = IndicatorEngine(bar_fetcher=self._market_store.fetch_recent_bars)
+        self._feature_builder = FeatureBuilder()
         self._execution_service = ExecutionService()
         self._rag_service = RAGService(self._history_store)
         self._strategy_agent = StrategySelectionAgent()
@@ -56,9 +62,14 @@ class AgentLoop:
             "status": "stopped",
             "last_error": None,
         }
-        self._last_bar_timestamp: Optional[str] = None
+        self._last_raw_bar_timestamp: Optional[str] = None
+        self._last_synthetic_timestamp: Optional[str] = None
         self._indicator_inputs = self._load_indicator_inputs()
         self._indicator_engine.set_inputs(self._indicator_inputs)
+
+    @staticmethod
+    def _format_exception(exc: Exception) -> str:
+        return f"{exc.__class__.__name__}: {repr(exc)}\n{traceback.format_exc()}"
 
     def _create_bar_data_source(self, interval: str) -> IBBarDataSource:
         return IBBarDataSource(
@@ -68,10 +79,11 @@ class AgentLoop:
 
     @property
     def bar_interval(self) -> str:
-        return self._bar_data_source.bar_interval
+        return self._market_store.bar_interval
 
     async def set_bar_interval(self, interval: str):
-        self._bar_data_source.set_bar_interval(interval)
+        # Validate requested chart interval even though upstream data is always 1m.
+        IBBarDataSource.interval_seconds(interval)
         self._market_store.bar_interval = interval
         self._indicator_engine.set_runtime_context(self._symbol, interval)
         if self._running:
@@ -94,12 +106,6 @@ class AgentLoop:
         if self._running:
             await self.stop()
             await self.start()
-
-    def _fetch_recent_bars(self, symbol: str, interval: str, limit: int):
-        repo = self._market_store.bar_repository
-        if not repo or not hasattr(repo, "fetch_recent_bars"):
-            return []
-        return repo.fetch_recent_bars(symbol=symbol, interval=interval, limit=limit)
 
     def _load_indicator_inputs(self) -> Dict[str, Any]:
         stored = self._indicator_settings_repo.load("indicator_inputs")
@@ -159,6 +165,7 @@ class AgentLoop:
             )
             await self._market_data_source.connect()
             await self._bar_data_source.connect()
+            await self._prime_base_bars()
             self._start_worker_tasks()
             self._ready.set()
 
@@ -168,11 +175,12 @@ class AgentLoop:
             self._ready.set()
             raise
         except Exception as exc:
-            self._state["last_error"] = str(exc)
+            self._state["last_error"] = self._format_exception(exc)
             self._state["status"] = "error"
             self._running = False
             self._ready.set()
         finally:
+            self._bar_aggregator.reset()
             if self._tick_task:
                 self._tick_task.cancel()
             if self._bar_task:
@@ -193,7 +201,7 @@ class AgentLoop:
         exc = task.exception()
         if exc is None:
             return
-        self._state["last_error"] = f"worker task failed: {exc}"
+        self._state["last_error"] = f"worker task failed: {self._format_exception(exc)}"
         if not self._running:
             self._state["status"] = "stopped"
             return
@@ -238,7 +246,7 @@ class AgentLoop:
                 self._state["status"] = "running"
                 self._state["last_error"] = None
             except Exception as exc:
-                self._state["last_error"] = f"reconnect failed: {exc}"
+                self._state["last_error"] = f"reconnect failed: {self._format_exception(exc)}"
                 self._state["status"] = "error"
                 self._running = False
             finally:
@@ -258,27 +266,30 @@ class AgentLoop:
             #   emit a synthetic bar per interval using the latest delayed tick price.
             await self._sleep_until_next_bar_boundary()
 
-            bar = await self._bar_data_source.fetch_latest_bar()
-            bar_ts = bar.get("timestamp") if bar else None
+            raw_bar = await self._bar_data_source.fetch_latest_bar()
+            raw_bar_ts = raw_bar.get("timestamp") if raw_bar else None
 
-            if bar and bar_ts and bar_ts != self._last_bar_timestamp:
-                self._market_store.update_bar(bar)
-                self._last_bar_timestamp = bar_ts
-                await self._strategy_cycle()
+            if raw_bar and raw_bar_ts and raw_bar_ts != self._last_raw_bar_timestamp:
+                self._market_store.update_bar(raw_bar, interval=self._base_bar_interval)
+                self._last_raw_bar_timestamp = raw_bar_ts
+                await self._ingest_and_run(raw_bar)
                 continue
 
             # Fallback: synthesize a bar so DB shows periodic updates in demo mode.
             tick = self._market_store.current_tick
             price = tick.get("price")
+            if price in (None, 0):
+                # If delayed tick is missing, fallback to latest known bar close to avoid zero bars.
+                price = (self._market_store.current_bar or {}).get("close")
             if price is None:
                 # Nothing to synthesize yet; try again next interval.
                 continue
 
-            interval_s = IBBarDataSource.interval_seconds(self.bar_interval)
+            interval_s = IBBarDataSource.interval_seconds(self._base_bar_interval)
             now_s = int(datetime.now(timezone.utc).timestamp())
             bucket_start = (now_s // interval_s) * interval_s
             synthetic_ts = datetime.fromtimestamp(bucket_start, tz=timezone.utc).isoformat()
-            if synthetic_ts == self._last_bar_timestamp:
+            if synthetic_ts == self._last_synthetic_timestamp:
                 continue
 
             synthetic_bar = {
@@ -291,17 +302,59 @@ class AgentLoop:
                 "timestamp": synthetic_ts,
                 "source": "synthetic_bar",
             }
-            self._market_store.update_bar(synthetic_bar)
-            self._last_bar_timestamp = synthetic_ts
-            await self._strategy_cycle()
+            self._market_store.update_bar(synthetic_bar, interval=self._base_bar_interval)
+            self._last_synthetic_timestamp = synthetic_ts
+            await self._ingest_and_run(synthetic_bar)
+
+    async def _prime_base_bars(self):
+        """Warm up base bars at startup so indicators on higher timeframes have samples."""
+        try:
+            bars = await self._bar_data_source.fetch_recent_bars(limit=500)
+        except Exception:
+            return
+        for bar in bars:
+            ts = bar.get("timestamp")
+            if not ts or ts == self._last_raw_bar_timestamp:
+                continue
+            self._market_store.update_bar(bar, interval=self._base_bar_interval)
+            self._last_raw_bar_timestamp = ts
+            await self._ingest_and_run(bar)
+
+    async def _ingest_and_run(self, base_bar: Dict[str, Any]):
+        target_intervals = self._active_intervals_for_aggregation()
+        emitted = self._bar_aggregator.push(base_bar, target_intervals)
+        for item in emitted:
+            interval = item.get("interval")
+            bar = item.get("bar")
+            if not interval or not bar:
+                continue
+            if interval != self._base_bar_interval:
+                self._market_store.update_bar(bar, interval=interval)
+            if interval == self.bar_interval:
+                self._market_store.current_bar = bar
+                await self._strategy_cycle()
+
+    def _active_intervals_for_aggregation(self):
+        intervals = {self.bar_interval}
+        inputs = self.indicator_inputs()
+        for cfg in inputs.values():
+            if not isinstance(cfg, dict):
+                continue
+            tf = str(cfg.get("timeframe", "chart"))
+            if tf == "chart":
+                intervals.add(self.bar_interval)
+            else:
+                intervals.add(tf)
+        intervals.add(self._base_bar_interval)
+        return [i for i in intervals if i]
 
     async def _strategy_cycle(self):
         last_run = datetime.utcnow().isoformat()
-        self._indicator_engine.set_runtime_context(self.symbol, self.bar_interval)
-        calc_result = self._indicator_engine.calculate_all(self._market_store.current_bar)
-        indicators = calc_result.get("indicators", {})
-        signals = calc_result.get("signals", {})
-        self._signal_store.update(signals, indicators=indicators, last_run=last_run)
+        indicators, indicator_features = self._run_indicators()
+        features = self._run_features(indicators=indicators, indicator_features=indicator_features)
+        self._feature_store.update(features, last_run=last_run)
+        # G2 signal layer is not implemented yet. Keep signal store for compatibility.
+        self._signal_store.update({}, indicators=indicators, last_run=last_run)
 
         # Indicator-focused mode:
         # Temporarily disable strategy selection, decision making, and order execution.
@@ -330,11 +383,28 @@ class AgentLoop:
         # self._state["decision"] = decision
         self._state["last_run"] = last_run
 
+    def _run_indicators(self):
+        self._indicator_engine.set_runtime_context(self.symbol, self.bar_interval)
+        calc_result = self._indicator_engine.calculate_all(self._market_store.current_bar)
+        return (
+            calc_result.get("indicators", {}),
+            calc_result.get("features", {}),
+        )
+
+    def _run_features(self, indicators, indicator_features):
+        history = self._market_store.fetch_recent_bars(self.symbol, self.bar_interval, limit=30)
+        return self._feature_builder.build(
+            bar=self._market_store.current_bar,
+            indicators=indicators,
+            indicator_features=indicator_features,
+            history=history,
+        )
+
     async def _sleep_until_next_bar_boundary(self):
         # Align bar loop to the selected interval boundary.
         interval = self.bar_interval
         try:
-            seconds = IBBarDataSource.interval_seconds(interval)
+            seconds = IBBarDataSource.interval_seconds(self._base_bar_interval)
         except Exception:
             seconds = 60
 
@@ -342,26 +412,5 @@ class AgentLoop:
         next_boundary = ((int(now) // seconds) + 1) * seconds
         sleep_for = max(0.0, next_boundary - now)
         await asyncio.sleep(max(0.25, sleep_for))
-
-    def status(self):
-        return {
-            "running": self._running,
-            "last_run": self._state["last_run"],
-            "strategy": self._state["strategy"],
-            "decision": self._state["decision"],
-            "status": self._state["status"],
-            "last_error": self._state.get("last_error"),
-            "symbol": self.symbol,
-            "bar_interval": self.bar_interval,
-        }
-
-    def market_summary(self):
-        return self._market_store.market_summary()
-
-    def signals_summary(self):
-        summary = self._signal_store.summary()
-        summary["inputs"] = self.indicator_inputs()
-        return summary
-
 
 agent_loop = AgentLoop()

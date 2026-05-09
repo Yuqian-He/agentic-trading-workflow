@@ -16,11 +16,11 @@ class Settings(BaseSettings):
     ib_port: int = 7497
     ib_client_id: int = 101
     ib_account: str = ""
-    ib_symbol: str = "AAPL"
+    ib_symbol: str = "QQQ"
     ib_exchange: str = "SMART"
     ib_currency: str = "USD"
     ib_market_data_type: int = 3
-    ib_ticker_options_csv: str = "AAPL,MSFT"
+    ib_ticker_options_csv: str = "QQQ,AAPL,MSFT"
     tick_db_path: str = "data/market_ticks.sqlite3"
     bar_db_path: str = "data/market_bars.sqlite3"
 

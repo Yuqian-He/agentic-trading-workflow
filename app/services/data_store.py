@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional, Protocol
+from typing import Any, Dict, List, Optional, Protocol
 
 
 class TickRepository(Protocol):
@@ -52,11 +52,17 @@ class MarketDataStore:
 
         return normalized_tick
 
-    def update_bar(self, bar: Dict[str, Any]) -> Dict[str, Any]:
+    def update_bar(self, bar: Dict[str, Any], interval: Optional[str] = None) -> Dict[str, Any]:
         self.current_bar = bar
         if self.bar_repository:
-            self.bar_repository.save_bar(bar, interval=self.bar_interval)
+            self.bar_repository.save_bar(bar, interval=interval or self.bar_interval)
         return bar
+
+    def fetch_recent_bars(self, symbol: str, interval: str, limit: int) -> List[Dict[str, Any]]:
+        repo = self.bar_repository
+        if not repo or not hasattr(repo, "fetch_recent_bars"):
+            return []
+        return repo.fetch_recent_bars(symbol=symbol, interval=interval, limit=limit)
 
     def market_summary(self):
         latest_price = None
@@ -103,6 +109,35 @@ class SignalStore:
         return {
             "signals": dict(self._signals),
             "indicators": dict(self._indicators),
+            "last_run": self._last_run,
+        }
+
+
+class FeatureStore:
+    def __init__(self):
+        self.current: Dict[str, Any] = {}
+        self.history = []
+        self._last_run: Optional[str] = None
+
+    def update(self, features: Dict[str, Any], last_run: Optional[str] = None) -> Dict[str, Any]:
+        snapshot = dict(features or {})
+        self.current = snapshot
+        if last_run is not None:
+            self._last_run = last_run
+        self.history.append(
+            {
+                "timestamp": last_run,
+                "features": snapshot,
+            }
+        )
+        # Keep memory bounded for UI/API usage.
+        if len(self.history) > 500:
+            self.history = self.history[-500:]
+        return self.current
+
+    def summary(self) -> Dict[str, Any]:
+        return {
+            "features": dict(self.current),
             "last_run": self._last_run,
         }
 

@@ -209,6 +209,7 @@
       <div class="row">
         <label for="ticker">Ticker</label>
         <select id="ticker">
+          <option value="QQQ">QQQ</option>
           <option value="AAPL">AAPL</option>
           <option value="MSFT">MSFT</option>
         </select>
@@ -313,7 +314,7 @@
       </div>
 
       <div class="card">
-        <p class="sectionTitle">Indicators (all enabled)</p>
+        <p class="sectionTitle">Indicators (numeric only)</p>
         <div id="indicators" class="indicatorList">
           <div class="indicatorCard">
             <div class="indicatorHead">
@@ -321,7 +322,6 @@
               <div class="indicatorRun">Last run: -</div>
             </div>
             <div class="kv"><div class="k">Value</div><div class="v">-</div></div>
-            <div class="kv"><div class="k">Signal</div><div class="v">-</div></div>
           </div>
           <div class="indicatorCard">
             <div class="indicatorHead">
@@ -329,7 +329,21 @@
               <div class="indicatorRun">Last run: -</div>
             </div>
             <div class="kv"><div class="k">Value</div><div class="v">-</div></div>
-            <div class="kv"><div class="k">Signal</div><div class="v">-</div></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <p class="sectionTitle">Features</p>
+        <div id="features" class="indicatorList">
+          <div class="indicatorCard">
+            <div class="indicatorHead">
+              <div class="indicatorName">Feature Snapshot</div>
+              <div class="indicatorRun">Last run: -</div>
+            </div>
+            <div class="kv"><div class="k">trend</div><div class="v">-</div></div>
+            <div class="kv"><div class="k">rsi_state</div><div class="v">-</div></div>
+            <div class="kv"><div class="k">price_vs_sma</div><div class="v">-</div></div>
           </div>
         </div>
       </div>

@@ -7,6 +7,7 @@ const tickerSelect = document.getElementById('ticker');
 const barIntervalSelect = document.getElementById('bar-interval');
 const sessionEl = document.getElementById('session');
 const indicatorsEl = document.getElementById('indicators');
+const featuresEl = document.getElementById('features');
 const smaSourceSelect = document.getElementById('sma-source');
 const smaLengthInput = document.getElementById('sma-length');
 const smaTimeframeSelect = document.getElementById('sma-timeframe');
@@ -16,14 +17,10 @@ const rsiOverboughtInput = document.getElementById('rsi-overbought');
 const rsiOversoldInput = document.getElementById('rsi-oversold');
 const rsiTimeframeSelect = document.getElementById('rsi-timeframe');
 const logBuffer = [];
-const DEFAULT_TICKERS = ['AAPL', 'MSFT'];
+const DEFAULT_TICKERS = ['QQQ', 'AAPL', 'MSFT'];
 const DEFAULT_INTERVALS = ['1m', '3m', '5m', '15m', '30m', '45m', '1H', '2H', '3H', '4H'];
 let lastSeenLoopStatus = null;
 let lastSeenLoopError = null;
-const INDICATOR_SIGNAL_MAP = {
-  sma: 'sma_signal',
-  rsi: 'rsi_signal',
-};
 
 function setBusy(isBusy) {
   if (startBtn) startBtn.disabled = isBusy;
@@ -97,28 +94,62 @@ function renderIndicators(live) {
   if (!indicatorsEl) return;
   const summary = live?.signals_summary || {};
   const indicators = summary?.indicators || {};
-  const signals = summary?.signals || {};
   const inputs = summary?.inputs || {};
   const lastRun = formatLastRun(summary?.last_run || live?.last_run);
   const keys = Array.from(new Set([...Object.keys(indicators), ...Object.keys(inputs)]));
 
   indicatorsEl.innerHTML = keys
     .map((name) => {
-      const signalKey = INDICATOR_SIGNAL_MAP[name] || `${name}_signal`;
-      const cfg = inputs[name] ? JSON.stringify(inputs[name]) : '-';
+      const cfgObj = inputs[name] || {};
+      const cfg = Object.keys(cfgObj).length > 0 ? JSON.stringify(cfgObj) : '-';
+      const cfgInline = Object.keys(cfgObj).length > 0
+        ? Object.entries(cfgObj).map(([k, v]) => `${k}:${v}`).join(', ')
+        : 'no input';
       return `
         <div class="indicatorCard">
           <div class="indicatorHead">
-            <div class="indicatorName">${String(name).toUpperCase()}</div>
+            <div class="indicatorName">${String(name).toUpperCase()} (${cfgInline})</div>
             <div class="indicatorRun">Last run: ${lastRun}</div>
           </div>
           <div class="kv"><div class="k">Input</div><div class="v">${cfg}</div></div>
           <div class="kv"><div class="k">Value</div><div class="v">${indicators[name] ?? '-'}</div></div>
-          <div class="kv"><div class="k">Signal</div><div class="v">${signals[signalKey] ?? '-'}</div></div>
         </div>
       `;
     })
     .join('');
+}
+
+function renderFeatures(live) {
+  if (!featuresEl) return;
+  const summary = live?.features_summary || {};
+  const features = summary?.features || {};
+  const lastRun = formatLastRun(summary?.last_run || live?.last_run);
+  const keys = Object.keys(features);
+
+  if (keys.length === 0) {
+    featuresEl.innerHTML = `
+      <div class="indicatorCard">
+        <div class="indicatorHead">
+          <div class="indicatorName">Feature Snapshot</div>
+          <div class="indicatorRun">Last run: ${lastRun}</div>
+        </div>
+        <div class="kv"><div class="k">status</div><div class="v">No features yet</div></div>
+      </div>
+    `;
+    return;
+  }
+
+  featuresEl.innerHTML = `
+    <div class="indicatorCard">
+      <div class="indicatorHead">
+        <div class="indicatorName">Feature Snapshot</div>
+        <div class="indicatorRun">Last run: ${lastRun}</div>
+      </div>
+      ${keys
+        .map((k) => `<div class="kv"><div class="k">${k}</div><div class="v">${features[k]}</div></div>`)
+        .join('')}
+    </div>
+  `;
 }
 
 function getIndicatorInputs() {
@@ -261,6 +292,7 @@ async function updateLive() {
     }
     output.innerHTML = formatLiveData(live);
     renderIndicators(live);
+    renderFeatures(live);
   } catch (err) {
     appendLog(`live data update failed: ${err.message}`);
   }
@@ -280,6 +312,7 @@ function renderUserSelectionPreview() {
   };
   output.innerHTML = formatLiveData(preview);
   renderIndicators(preview);
+  renderFeatures(preview);
 }
 
 if (tickerSelect) {
