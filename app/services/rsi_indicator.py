@@ -47,10 +47,10 @@ class RSIIndicator:
         if not bar:
             return None
         source = (source or "close").lower()
-        o = float(bar.get("open", 0.0))
-        h = float(bar.get("high", 0.0))
-        l = float(bar.get("low", 0.0))
-        c = float(bar.get("close", 0.0))
+        o = self._safe_positive_float(bar.get("open"))
+        h = self._safe_positive_float(bar.get("high"))
+        l = self._safe_positive_float(bar.get("low"))
+        c = self._safe_positive_float(bar.get("close"))
         if source == "open":
             return o
         if source == "high":
@@ -58,10 +58,26 @@ class RSIIndicator:
         if source == "low":
             return l
         if source == "hl2":
+            if h is None or l is None:
+                return None
             return (h + l) / 2.0
         if source == "ohlc4":
+            if o is None or h is None or l is None or c is None:
+                return None
             return (o + h + l + c) / 4.0
         return c
+
+    @staticmethod
+    def _safe_positive_float(value: Any) -> Optional[float]:
+        try:
+            if value is None:
+                return None
+            v = float(value)
+            if v <= 0:
+                return None
+            return v
+        except (TypeError, ValueError):
+            return None
 
     def _new_state(self, length: int) -> Dict[str, Any]:
         return {

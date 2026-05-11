@@ -14,10 +14,12 @@ from .services.rag import RAGService
 from .services.indicators import IndicatorEngine
 from .services.feature_builder import FeatureBuilder
 from .services.execution import ExecutionService
+from .utils.logger import get_logger
 
 
 class AgentLoop:
     def __init__(self):
+        self._logger = get_logger(__name__)
         self._base_bar_interval = "1m"
         self._task = None
         self._running = False
@@ -31,6 +33,10 @@ class AgentLoop:
             port=settings.ib_port,
             client_id=settings.ib_client_id,
             account=settings.ib_account or None,
+            client_id_fallback_span=settings.ib_client_id_fallback_span,
+            connect_timeout_seconds=settings.ib_connect_timeout_seconds,
+            connect_retries=settings.ib_connect_retries,
+            connect_retry_delay_seconds=settings.ib_connect_retry_delay_seconds,
         )
         self._market_data_source = IBMarketDataSource(
             ib_connection=self._ib_connection,
@@ -51,6 +57,8 @@ class AgentLoop:
         self._execution_agent = ExecutionDecisionAgent()
         self._tick_task = None
         self._bar_task = None
+        self._gap_backfill_task = None
+        self._gap_backfill_started = False
         self._reconnect_lock = asyncio.Lock()
         self._reconnecting = False
         self._ready = asyncio.Event()
@@ -61,6 +69,15 @@ class AgentLoop:
             "decision": None,
             "status": "stopped",
             "last_error": None,
+            "backfill": {
+                "status": "idle",
+                "triggered_at": None,
+                "from_ts": None,
+                "to_ts": None,
+                "inserted": 0,
+                "error": None,
+                "finished_at": None,
+            },
         }
         self._last_raw_bar_timestamp: Optional[str] = None
         self._last_synthetic_timestamp: Optional[str] = None
@@ -137,6 +154,17 @@ class AgentLoop:
         if self._running:
             return
         self._ready.clear()
+        self._gap_backfill_started = False
+        self._gap_backfill_task = None
+        self._state["backfill"] = {
+            "status": "idle",
+            "triggered_at": None,
+            "from_ts": None,
+            "to_ts": None,
+            "inserted": 0,
+            "error": None,
+            "finished_at": None,
+        }
         self._running = True
         self._state["status"] = "running"
         self._state["last_error"] = None
@@ -147,6 +175,8 @@ class AgentLoop:
 
     async def stop(self):
         self._running = False
+        if self._gap_backfill_task and not self._gap_backfill_task.done():
+            self._gap_backfill_task.cancel()
         if self._task:
             self._task.cancel()
             try:
@@ -185,6 +215,8 @@ class AgentLoop:
                 self._tick_task.cancel()
             if self._bar_task:
                 self._bar_task.cancel()
+            if self._gap_backfill_task and not self._gap_backfill_task.done():
+                self._gap_backfill_task.cancel()
             await self._market_data_source.close()
             await self._bar_data_source.close()
             await self._ib_connection.close()
@@ -272,7 +304,11 @@ class AgentLoop:
             if raw_bar and raw_bar_ts and raw_bar_ts != self._last_raw_bar_timestamp:
                 self._market_store.update_bar(raw_bar, interval=self._base_bar_interval)
                 self._last_raw_bar_timestamp = raw_bar_ts
+                self._maybe_start_gap_backfill(raw_bar_ts)
                 await self._ingest_and_run(raw_bar)
+                continue
+
+            if not settings.ib_enable_synthetic_bars:
                 continue
 
             # Fallback: synthesize a bar so DB shows periodic updates in demo mode.
@@ -281,7 +317,11 @@ class AgentLoop:
             if price in (None, 0):
                 # If delayed tick is missing, fallback to latest known bar close to avoid zero bars.
                 price = (self._market_store.current_bar or {}).get("close")
-            if price is None:
+            try:
+                price = float(price) if price is not None else None
+            except (TypeError, ValueError):
+                price = None
+            if price is None or price <= 0:
                 # Nothing to synthesize yet; try again next interval.
                 continue
 
@@ -306,6 +346,83 @@ class AgentLoop:
             self._last_synthetic_timestamp = synthetic_ts
             await self._ingest_and_run(synthetic_bar)
 
+    def _maybe_start_gap_backfill(self, latest_live_ts: str) -> None:
+        if self._gap_backfill_started:
+            return
+        self._gap_backfill_started = True
+        self._state["backfill"].update(
+            {
+                "status": "scheduled",
+                "triggered_at": datetime.now(timezone.utc).isoformat(),
+                "to_ts": latest_live_ts,
+                "error": None,
+                "finished_at": None,
+            }
+        )
+        self._gap_backfill_task = asyncio.create_task(self._run_gap_backfill(latest_live_ts))
+
+    async def _run_gap_backfill(self, latest_live_ts: str) -> None:
+        try:
+            self._state["backfill"]["status"] = "running"
+            repo = self._market_store.bar_repository
+            if not repo or not hasattr(repo, "fetch_latest_timestamp"):
+                self._state["backfill"]["status"] = "skipped_no_repo"
+                self._state["backfill"]["finished_at"] = datetime.now(timezone.utc).isoformat()
+                return
+            historical_max = repo.fetch_latest_timestamp(self.symbol, self._base_bar_interval, source="historical_file")
+            if not historical_max:
+                self._state["backfill"]["status"] = "skipped_no_historical_seed"
+                self._state["backfill"]["finished_at"] = datetime.now(timezone.utc).isoformat()
+                return
+            if historical_max >= latest_live_ts:
+                self._state["backfill"]["status"] = "skipped_no_gap"
+                self._state["backfill"]["from_ts"] = historical_max
+                self._state["backfill"]["to_ts"] = latest_live_ts
+                self._state["backfill"]["finished_at"] = datetime.now(timezone.utc).isoformat()
+                return
+            self._state["backfill"]["from_ts"] = historical_max
+            self._state["backfill"]["to_ts"] = latest_live_ts
+            bars = await self._bar_data_source.fetch_bars_between(
+                start_exclusive_iso=historical_max,
+                end_inclusive_iso=latest_live_ts,
+                chunk_duration="3 D",
+                max_chunks=20,
+            )
+            if not bars:
+                self._state["backfill"]["status"] = "done_empty"
+                self._state["backfill"]["inserted"] = 0
+                self._state["backfill"]["finished_at"] = datetime.now(timezone.utc).isoformat()
+                return
+            if hasattr(repo, "upsert_bars"):
+                inserted = await asyncio.to_thread(repo.upsert_bars, bars, self._base_bar_interval, 1000)
+            else:
+                # Compatibility fallback for repositories without bulk upsert API.
+                inserted = 0
+                for bar in bars:
+                    repo.save_bar(bar, interval=self._base_bar_interval)
+                    inserted += 1
+            self._state["backfill"]["status"] = "done"
+            self._state["backfill"]["inserted"] = inserted
+            self._state["backfill"]["finished_at"] = datetime.now(timezone.utc).isoformat()
+            self._logger.info(
+                "Gap backfill done for %s: %s -> %s, inserted=%s",
+                self.symbol,
+                historical_max,
+                latest_live_ts,
+                inserted,
+            )
+        except asyncio.CancelledError:
+            self._state["backfill"]["status"] = "cancelled"
+            self._state["backfill"]["finished_at"] = datetime.now(timezone.utc).isoformat()
+            raise
+        except Exception as exc:
+            self._state["backfill"]["status"] = "error"
+            self._state["backfill"]["error"] = self._format_exception(exc)
+            self._state["backfill"]["finished_at"] = datetime.now(timezone.utc).isoformat()
+            self._logger.exception("Gap backfill failed")
+            # Do not impact live loop if gap backfill fails.
+            return
+
     async def _prime_base_bars(self):
         """Warm up base bars at startup so indicators on higher timeframes have samples."""
         try:
@@ -319,6 +436,12 @@ class AgentLoop:
             self._market_store.update_bar(bar, interval=self._base_bar_interval)
             self._last_raw_bar_timestamp = ts
             await self._ingest_and_run(bar)
+        # Fallback trigger:
+        # If market is quiet right after startup, _bar_loop may not see a brand-new
+        # raw bar quickly. Trigger gap backfill from the latest primed bar so
+        # historical->live gap can still be filled asynchronously.
+        if self._last_raw_bar_timestamp:
+            self._maybe_start_gap_backfill(self._last_raw_bar_timestamp)
 
     async def _ingest_and_run(self, base_bar: Dict[str, Any]):
         target_intervals = self._active_intervals_for_aggregation()

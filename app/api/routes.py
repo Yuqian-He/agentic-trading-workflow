@@ -58,6 +58,18 @@ async def get_summary():
 async def get_live():
     return presenter.live()
 
+@router.get("/health/backfill")
+async def get_backfill_health():
+    status = presenter.status()
+    return {
+        "symbol": status.get("symbol"),
+        "bar_interval": status.get("bar_interval"),
+        "running": status.get("running"),
+        "status": status.get("status"),
+        "backfill": status.get("backfill", {}),
+        "last_error": status.get("last_error"),
+    }
+
 
 @router.get("/settings")
 async def get_settings():

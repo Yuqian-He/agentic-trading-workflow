@@ -16,6 +16,7 @@ class AgentPresenter:
             "decision": state.get("decision"),
             "status": state.get("status", "stopped"),
             "last_error": state.get("last_error"),
+            "backfill": state.get("backfill", {}),
             "symbol": self._agent.symbol,
             "bar_interval": self._agent.bar_interval,
         }

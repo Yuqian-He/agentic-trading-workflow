@@ -9,5 +9,6 @@ class AgentStatus(BaseModel):
     strategy: Optional[Any]
     decision: Optional[Any]
     status: str
+    backfill: Optional[Any] = None
     symbol: str
     bar_interval: str

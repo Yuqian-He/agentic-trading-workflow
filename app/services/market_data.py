@@ -1,6 +1,6 @@
 import asyncio
 import math
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Protocol
 
 
@@ -33,11 +33,20 @@ class IBConnection:
         port: int = 7497,
         client_id: int = 1,
         account: Optional[str] = None,
+        client_id_fallback_span: int = 8,
+        connect_timeout_seconds: int = 20,
+        connect_retries: int = 3,
+        connect_retry_delay_seconds: float = 1.5,
     ):
         self.host = host
         self.port = port
         self.client_id = client_id
         self.account = account
+        self.client_id_fallback_span = max(0, int(client_id_fallback_span))
+        self.connect_timeout_seconds = max(3, int(connect_timeout_seconds))
+        self.connect_retries = max(1, int(connect_retries))
+        self.connect_retry_delay_seconds = max(0.1, float(connect_retry_delay_seconds))
+        self._active_client_id = client_id
         self._ib = None
         self._contract = None
 
@@ -49,17 +58,45 @@ class IBConnection:
             raise RuntimeError("ib_insync is required for IB connection. Install backend requirements first.") from exc
 
         self._patch_ib_insync_loop(util, client, connection)
-        self._ib = IB()
-        connect_kwargs = {
-            "host": self.host,
-            "port": self.port,
-            "clientId": self.client_id,
-        }
-        if self.account:
-            connect_kwargs["account"] = self.account
+        last_exc: Optional[Exception] = None
+        candidates = self._client_id_candidates()
 
-        await self._ib.connectAsync(**connect_kwargs)
-        self._contract = Stock(symbol, exchange, currency)
+        for cid in candidates:
+            for attempt in range(1, self.connect_retries + 1):
+                self._ib = IB()
+                connect_kwargs = {
+                    "host": self.host,
+                    "port": self.port,
+                    "clientId": cid,
+                    "timeout": self.connect_timeout_seconds,
+                }
+                if self.account:
+                    connect_kwargs["account"] = self.account
+                try:
+                    await self._ib.connectAsync(**connect_kwargs)
+                    self._active_client_id = cid
+                    self._contract = Stock(symbol, exchange, currency)
+                    return
+                except Exception as exc:
+                    last_exc = exc
+                    message = str(exc).lower()
+                    try:
+                        if self._ib and self._ib.isConnected():
+                            self._ib.disconnect()
+                    except Exception:
+                        pass
+
+                    # If this clientId is occupied, immediately try next candidate.
+                    if "already in use" in message or "clientid" in message and "in use" in message:
+                        break
+                    if attempt < self.connect_retries:
+                        await asyncio.sleep(self.connect_retry_delay_seconds)
+
+        raise RuntimeError(
+            f"IB connect failed after trying clientIds={candidates} with "
+            f"timeout={self.connect_timeout_seconds}s and retries={self.connect_retries} "
+            f"(host={self.host}, port={self.port}): {last_exc}"
+        ) from last_exc
 
     async def close(self) -> None:
         if self._ib and self._ib.isConnected():
@@ -72,6 +109,20 @@ class IBConnection:
     @property
     def contract(self):
         return self._contract
+
+    @property
+    def active_client_id(self) -> int:
+        return int(self._active_client_id)
+
+    def _client_id_candidates(self) -> List[int]:
+        out: List[int] = []
+        # Try last successful clientId first.
+        if int(self._active_client_id) not in out:
+            out.append(int(self._active_client_id))
+        for i in range(self.client_id, self.client_id + self.client_id_fallback_span + 1):
+            if i not in out:
+                out.append(i)
+        return out
 
     @staticmethod
     def _patch_ib_insync_loop(util, client, connection) -> None:
@@ -234,6 +285,71 @@ class IBBarDataSource:
             )
         return result
 
+    async def fetch_bars_between(
+        self,
+        *,
+        start_exclusive_iso: str,
+        end_inclusive_iso: str,
+        chunk_duration: str = "1 D",
+        max_chunks: int = 30,
+    ) -> List[Dict[str, Any]]:
+        """Fetch bars in (start, end] by paging backward from endDateTime."""
+        if not self.ib_connection.ib or not self.ib_connection.contract:
+            raise RuntimeError("IB bar data source is not connected.")
+
+        start_dt = self._parse_iso_utc(start_exclusive_iso)
+        end_dt = self._parse_iso_utc(end_inclusive_iso)
+        if start_dt is None or end_dt is None or start_dt >= end_dt:
+            return []
+
+        cursor = end_dt
+        out: Dict[str, Dict[str, Any]] = {}
+        chunks = 0
+
+        while cursor > start_dt and chunks < max_chunks:
+            bars = await self.ib_connection.ib.reqHistoricalDataAsync(
+                self.ib_connection.contract,
+                endDateTime=self._ib_end_datetime(cursor),
+                durationStr=chunk_duration,
+                barSizeSetting=self.bar_size_setting,
+                whatToShow="TRADES",
+                useRTH=False,
+                formatDate=1,
+                keepUpToDate=False,
+            )
+            chunks += 1
+            if not bars:
+                break
+
+            min_dt_in_chunk: Optional[datetime] = None
+            for bar in bars:
+                ts_iso = self._timestamp_to_iso(bar.date)
+                ts_dt = self._parse_iso_utc(ts_iso)
+                if ts_dt is None:
+                    continue
+                if ts_dt <= start_dt or ts_dt > end_dt:
+                    continue
+                out[ts_iso] = {
+                    "symbol": self.ib_connection.contract.symbol,
+                    "open": self._to_float(bar.open),
+                    "high": self._to_float(bar.high),
+                    "low": self._to_float(bar.low),
+                    "close": self._to_float(bar.close),
+                    "volume": int(bar.volume or 0),
+                    "timestamp": ts_iso,
+                    "source": "ib_gap_backfill_bar",
+                }
+                if min_dt_in_chunk is None or ts_dt < min_dt_in_chunk:
+                    min_dt_in_chunk = ts_dt
+
+            if min_dt_in_chunk is None:
+                break
+            cursor = min_dt_in_chunk - timedelta(seconds=1)
+
+        rows = list(out.values())
+        rows.sort(key=lambda x: x.get("timestamp") or "")
+        return rows
+
     @staticmethod
     def _timestamp_to_iso(value):
         if value is None:
@@ -243,6 +359,21 @@ class IBBarDataSource:
         if value.tzinfo is None:
             return value.replace(tzinfo=timezone.utc).isoformat()
         return value.astimezone(timezone.utc).isoformat()
+
+    @staticmethod
+    def _parse_iso_utc(value: str) -> Optional[datetime]:
+        try:
+            ts = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            return ts.astimezone(timezone.utc)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _ib_end_datetime(value: datetime) -> str:
+        # IB accepts "YYYYMMDD HH:MM:SS UTC".
+        return value.astimezone(timezone.utc).strftime("%Y%m%d %H:%M:%S UTC")
 
     @staticmethod
     def _to_float(value):

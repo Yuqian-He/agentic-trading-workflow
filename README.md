@@ -49,8 +49,10 @@ graph TD
 
 ```mermaid
 graph LR
-    A[Market tick/bar/orderbook] --> G1
-    D[Historical OHLCV + indicators] --> G1
+graph LR
+    A[Live Market tick/bar] --> B[Indicators]
+    D[Historical OHLCV] --> B
+    B --> G1
     N1[News NLP output<br/>sentiment / topic / entities] --> G1
 
     G1[Build Structured Features<br/>Describe facts only] --> O1["trend"]
