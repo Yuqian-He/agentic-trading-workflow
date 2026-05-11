@@ -49,7 +49,6 @@ graph TD
 
 ```mermaid
 graph LR
-graph LR
     A[Live Market tick/bar] --> B[Indicators]
     D[Historical OHLCV] --> B
     B --> G1
